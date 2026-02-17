@@ -2,7 +2,14 @@
 事件调度器：将解析结果转为时间轴上的音符事件，支持多声部同步
 """
 from dataclasses import dataclass, field
-from parser import ParsedScore, NoteEvent, ChordEvent, RestEvent, BarContent, Part
+from parser import ParsedScore, NoteEvent, ChordEvent, RestEvent, BarContent, Part, TTSEvent
+
+
+@dataclass
+class ScheduledSegment:
+    """调度后的篇章：该篇章前的 TTS + 音符列表（notes 的 start_time 相对于本篇章开始）"""
+    tts_before: list[TTSEvent]
+    notes: list["ScheduledNote"]
 
 
 @dataclass
@@ -118,77 +125,95 @@ def _collect_notes_from_aligned(
 
 
 def schedule(score: ParsedScore) -> list[ScheduledNote]:
-    """
-    将 ParsedScore 转为按时间排序的 ScheduledNote 列表。
-    按篇章顺序渲染，每篇章内多声部对齐，篇章之间拼接。
-    支持 [dc] Da Capo 和 [fine] 结束记号。
-    支持篇章间变速（bpm）、转拍（beat）。
-    """
+    """兼容接口：返回扁平化的音符列表（不含 TTS，供无 TTS 的简单播放）"""
+    segments = schedule_segments(score)
     all_notes: list[ScheduledNote] = []
-    global_beat = 0.0
+    t_offset = 0.0
+    for seg in segments:
+        for n in seg.notes:
+            all_notes.append(ScheduledNote(
+                start_time=n.start_time + t_offset,
+                duration=n.duration,
+                midis=n.midis,
+                volume=n.volume,
+            ))
+        if seg.notes:
+            t_offset += max(n.start_time + n.duration for n in seg.notes)
+    all_notes.sort(key=lambda n: (n.start_time, -len(n.midis)))
+    return all_notes
+
+
+def schedule_segments(score: ParsedScore) -> list[ScheduledSegment]:
+    """
+    将 ParsedScore 转为篇章列表，每篇章含 TTS（前）和音符。
+    支持 [dc] Da Capo 和 [fine] 结束记号。
+    """
+    segments: list[ScheduledSegment] = []
+    section_tts = getattr(score, "section_tts", None) or []
 
     sections = getattr(score, "sections", None) or ([score.parts] if score.parts else [])
     section_settings = getattr(score, "section_settings", None) or []
+    global_beat = 0.0
 
     for sec_idx, section in enumerate(sections):
         if not section:
             continue
+        tts_before = section_tts[sec_idx] if sec_idx < len(section_tts) else []
         if sec_idx < len(section_settings):
             s = section_settings[sec_idx]
             bpm = s.bpm
-            if s.no_bar_check:
-                default_beats_per_bar = 4.0
-            else:
-                default_beats_per_bar = s.beat_numerator
+            default_beats_per_bar = 4.0 if s.no_bar_check else float(s.beat_numerator)
         else:
             bpm = score.settings.bpm
-            if score.settings.no_bar_check:
-                default_beats_per_bar = 4.0
-            else:
-                default_beats_per_bar = score.settings.beat_numerator
+            default_beats_per_bar = 4.0 if score.settings.no_bar_check else float(score.settings.beat_numerator)
 
         beats_per_second = bpm / 60.0
         aligned = _align_parts(section)
-        # 首次收集：只停在 [dc]，不因 [fine] 停（[fine] 仅在 Da Capo 重奏时作为结束）
         notes1, next_beat, hit_fine, hit_dc = _collect_notes_from_aligned(
             aligned, global_beat, beats_per_second, default_beats_per_bar,
             stop_at_fine=False, stop_at_dc=True,
         )
-        all_notes.extend(notes1)
+        # 音符的 start_time 转为相对于本篇章开始（0）
+        seg_start = global_beat / beats_per_second
+        rel_notes = [
+            ScheduledNote(n.start_time - seg_start, n.duration, n.midis, n.volume)
+            for n in notes1
+        ]
+        segments.append(ScheduledSegment(tts_before=tts_before, notes=rel_notes))
         global_beat = next_beat
 
         if hit_dc:
-            # Da Capo：从全曲开头重奏，直至 [fine] 结束
             dc_beat = 0.0
-            notes_dc: list[ScheduledNote] = []
+            dc_segments: list[ScheduledSegment] = []
             for s_idx in range(sec_idx + 1):
                 sec = sections[s_idx]
+                tts = section_tts[s_idx] if s_idx < len(section_tts) else []
                 if s_idx < len(section_settings):
-                    s = section_settings[s_idx]
-                    bps = s.bpm / 60.0
-                    def_beats = s.beat_numerator if not s.no_bar_check else 4.0
+                    ss = section_settings[s_idx]
+                    bps = ss.bpm / 60.0
+                    def_beats = 4.0 if ss.no_bar_check else float(ss.beat_numerator)
                 else:
                     bps = score.settings.bpm / 60.0
-                    def_beats = score.settings.beat_numerator if not score.settings.no_bar_check else 4.0
+                    def_beats = 4.0 if score.settings.no_bar_check else float(score.settings.beat_numerator)
                 aligned = _align_parts(sec)
                 nd, next_b, hit_f, _ = _collect_notes_from_aligned(
                     aligned, dc_beat, bps, def_beats, stop_at_fine=True
                 )
-                notes_dc.extend(nd)
+                seg_s = dc_beat / bps
+                rel = [ScheduledNote(n.start_time - seg_s, n.duration, n.midis, n.volume) for n in nd]
+                dc_segments.append(ScheduledSegment(tts_before=tts, notes=rel))
                 dc_beat = next_b
                 if hit_f:
                     break
-            offset = global_beat / beats_per_second
-            for n in notes_dc:
-                all_notes.append(ScheduledNote(
-                    start_time=n.start_time + offset,
-                    duration=n.duration,
-                    midis=n.midis,
-                    volume=n.volume,
-                ))
+            segments.extend(dc_segments)
             break
         if hit_fine:
             break
 
-    all_notes.sort(key=lambda n: (n.start_time, -len(n.midis)))
-    return all_notes
+    # 末尾 TTS（最后一篇章之后）
+    if len(section_tts) > len(sections):
+        trailing = section_tts[len(sections)]
+        if trailing:
+            segments.append(ScheduledSegment(tts_before=trailing, notes=[]))
+
+    return segments

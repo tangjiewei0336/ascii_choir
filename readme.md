@@ -188,6 +188,29 @@
 由于这是一个创作类软件，很多时候小节号会给记谱带来额外负担。
 使用\no_bar_check即可禁用小节号，同时beat也无效。
 
+### TTS 语音（篇章间）
+`\tts{文本}` 或 `\tts{文本}{语言}` 用于在篇章之间插入语音朗读，**仅可插入在篇章之间**（双换行分隔的块）。
+- 支持语言：`zh` 中文、`ja` 日语、`en` 英语（默认）
+- 需安装 `edge-tts`，播放时需网络
+- 音频解码：优先用 `audioread`（macOS 可用系统 Core Audio，无需 ffmpeg）；否则需 `pydub` + `ffmpeg`（macOS: `brew install ffmpeg`）
+
+有效的例子：
+```text
+\tonality{1}
+\beat{4/4}
+\bpm{120}
+
+|1 2 3 4|
+
+\tts{第一段结束}{zh}
+
+|5 6 7 1|
+
+\tts{Verse two}{en}
+
+|1 2 3 4|5 6 7 1|
+```
+
 ## 编辑器功能
 
 ### 自动对齐
