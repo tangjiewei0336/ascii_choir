@@ -357,6 +357,7 @@ class App:
             self.current_file_path = path
             self.root.title(f"简谱演奏 - {path.name}")
             self._do_highlights()
+            self._highlight_current_file_in_workspace()
         except Exception as e:
             messagebox.showerror("打开失败", str(e))
     
@@ -387,6 +388,18 @@ class App:
         files = self._get_workspace_files()
         for f in files:
             self._workspace_list.insert(tk.END, f.name)
+        self._highlight_current_file_in_workspace()
+
+    def _highlight_current_file_in_workspace(self):
+        """高亮工作区中当前打开的文件"""
+        default_bg = "#2d2d2d" if self._dark_mode else "#ffffff"
+        current_bg = getattr(self._workspace_list, "current_file_bg", "#d4f0d4")
+        files = self._get_workspace_files()
+        for i in range(self._workspace_list.size()):
+            if i < len(files) and self.current_file_path and files[i].resolve() == self.current_file_path.resolve():
+                self._workspace_list.itemconfig(i, bg=current_bg)
+            else:
+                self._workspace_list.itemconfig(i, bg=default_bg)
     
     def _on_workspace_drag_start(self, event=None):
         """记录拖拽源文件，供输入框 ButtonRelease 插入 \\import{文件名}"""
@@ -396,6 +409,7 @@ class App:
             self._drag_file = files[idx].name
 
     def _on_workspace_file_select(self, event=None):
+        self._drag_file = None  # 双击打开文件，非拖拽，清除以免后续点文本框误插入
         sel = self._workspace_list.curselection()
         if not sel or not self.workspace_root:
             return
@@ -424,6 +438,7 @@ class App:
                 selectforeground="#ffffff",
             )
             self._workspace_list.hover_bg = "#3d3d3d"
+            self._workspace_list.current_file_bg = "#2a4a2a"
         else:
             self._workspace_list.configure(
                 bg="#ffffff",
@@ -432,26 +447,30 @@ class App:
                 selectforeground="#000000",
             )
             self._workspace_list.hover_bg = "#e8f4fc"
+            self._workspace_list.current_file_bg = "#d4f0d4"
 
     def _on_workspace_motion(self, event):
-        """悬浮高亮"""
+        """悬浮高亮，当前打开文件保持高亮"""
         idx = self._workspace_list.nearest(event.y)
         if idx == self._workspace_hover_index:
             return
         self._workspace_hover_index = idx
+        default_bg = "#2d2d2d" if self._dark_mode else "#ffffff"
+        current_bg = getattr(self._workspace_list, "current_file_bg", "#d4f0d4")
+        hover_bg = getattr(self._workspace_list, "hover_bg", "#e8f4fc")
+        files = self._get_workspace_files()
         for i in range(self._workspace_list.size()):
             if i == idx:
-                self._workspace_list.itemconfig(i, bg=getattr(self._workspace_list, "hover_bg", "#e8f4fc"))
+                self._workspace_list.itemconfig(i, bg=hover_bg)
+            elif i < len(files) and self.current_file_path and files[i].resolve() == self.current_file_path.resolve():
+                self._workspace_list.itemconfig(i, bg=current_bg)
             else:
-                default_bg = "#2d2d2d" if self._dark_mode else "#ffffff"
                 self._workspace_list.itemconfig(i, bg=default_bg)
 
     def _on_workspace_leave(self, event):
-        """离开列表时清除悬浮高亮"""
+        """离开列表时清除悬浮高亮，保留当前文件高亮"""
         self._workspace_hover_index = -1
-        default_bg = "#2d2d2d" if self._dark_mode else "#ffffff"
-        for i in range(self._workspace_list.size()):
-            self._workspace_list.itemconfig(i, bg=default_bg)
+        self._highlight_current_file_in_workspace()
 
     def _on_workspace_context_menu(self, event):
         """右键菜单：重命名、删除"""
@@ -643,6 +662,8 @@ class App:
         self.root.after(100, self._do_highlights)
         self.text.bind("<KeyRelease>", self._on_key_release)
         self.text.bind("<ButtonRelease-1>", self._on_text_button_release)
+        # 拖拽从 Listbox 到 Text 时，释放事件会发给 Listbox（鼠标被捕获），故用全局监听
+        self.root.bind_all("<ButtonRelease-1>", self._on_global_drop_check)
 
         # 可折叠的错误/警告面板
         self._diag_expanded = False
@@ -942,15 +963,41 @@ class App:
         arrow = "▼" if self._diag_expanded else "▶"
         self._diag_toggle_btn.config(text=f"{arrow} 错误与警告 ({count})")
 
-    def _on_text_button_release(self, event=None):
-        """处理从工作区拖放：在落点插入 \\import{文件名}"""
-        if event and getattr(self, "_drag_file", None):
+    def _on_global_drop_check(self, event=None):
+        """全局 ButtonRelease：从工作区拖到输入框时，释放事件会发给 Listbox，需在此处理"""
+        if not getattr(self, "_drag_file", None):
+            return
+        try:
+            rx, ry = self.root.winfo_pointerxy()
+            w = self.root.winfo_containing(rx, ry)
+            over_text = w == self.text or self._is_descendant(w, self.text)
+            if not over_text:
+                self._drag_file = None  # 释放在非输入框处，清除，避免双击打开后点文本框误插入
+                return
+            tx, ty = self.text.winfo_rootx(), self.text.winfo_rooty()
+            rel_x, rel_y = rx - tx, ry - ty
+            idx = self.text.index(f"@{rel_x},{rel_y}")
+            self.text.insert(idx, f"\\import{{{self._drag_file}}}")
+            self._drag_file = None
+            self._schedule_auto_save()
+            self.root.after(50, self._do_highlights)
+            self.root.after(50, self._update_status_bar)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _is_descendant(self, w: tk.Widget, ancestor: tk.Widget) -> bool:
+        """判断 w 是否为 ancestor 的后代"""
+        while w:
+            if w == ancestor:
+                return True
             try:
-                idx = self.text.index(f"@{event.x},{event.y}")
-                self.text.insert(idx, f"\\import{{{self._drag_file}}}")
-                self._drag_file = None
-            except tk.TclError:
-                pass
+                w = w.master
+            except AttributeError:
+                break
+        return False
+
+    def _on_text_button_release(self, event=None):
+        """处理输入框内点击/释放，更新状态栏；拖放由 _on_global_drop_check 处理"""
         self._on_cursor_move(event)
 
     def _on_cursor_move(self, event=None):
