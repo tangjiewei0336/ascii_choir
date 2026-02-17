@@ -15,6 +15,50 @@ from player import Player
 from validator import validate
 
 
+def _ask_rename(prompt: str, initial: str, parent: tk.Tk) -> str | None:
+    """重命名对话框：只选中文件名部分，不选中后缀"""
+    result: list[str | None] = [None]
+
+    def on_ok():
+        result[0] = entry.get().strip() or None
+        dlg.destroy()
+
+    def on_cancel():
+        dlg.destroy()
+
+    dlg = tk.Toplevel(parent)
+    dlg.title("重命名")
+    dlg.transient(parent)
+    dlg.grab_set()
+    ttk.Label(dlg, text=prompt).pack(anchor=tk.W, padx=10, pady=(10, 0))
+    entry = ttk.Entry(dlg, width=40)
+    entry.pack(padx=10, pady=5, fill=tk.X)
+    entry.insert(0, initial)
+    entry.focus_set()
+
+    def _select_stem():
+        stem_len = len(initial)
+        if initial.endswith(".choir"):
+            stem_len = len(initial) - 6
+        elif initial.endswith(".txt"):
+            stem_len = len(initial) - 4
+        entry.selection_range(0, stem_len)
+        entry.icursor(stem_len)
+
+    dlg.after(50, _select_stem)
+
+    btn_frame = ttk.Frame(dlg)
+    btn_frame.pack(pady=(5, 10))
+    ttk.Button(btn_frame, text="确定", command=on_ok).pack(side=tk.LEFT, padx=5)
+    ttk.Button(btn_frame, text="取消", command=on_cancel).pack(side=tk.LEFT)
+    entry.bind("<Return>", lambda e: on_ok())
+    entry.bind("<Escape>", lambda e: on_cancel())
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    dlg.geometry(f"+{parent.winfo_rootx() + 50}+{parent.winfo_rooty() + 100}")
+    dlg.wait_window()
+    return result[0]
+
+
 def _mono_font(size: int = 12) -> tuple:
     """获取等宽字体，便于小节对齐（跨平台）"""
     for name in ("Consolas", "Menlo", "Monaco", "DejaVu Sans Mono", "Liberation Mono", "Courier New"):
@@ -263,7 +307,9 @@ class App:
         self.root.after(2000, lambda: self.status_label.config(text="就绪"))
     
     def _on_open_workspace(self):
-        path = filedialog.askdirectory(title="选择工作区文件夹")
+        default_dir = WORKSPACES_DIR
+        default_dir.mkdir(parents=True, exist_ok=True)
+        path = filedialog.askdirectory(title="选择工作区文件夹", initialdir=str(default_dir))
         if path:
             self._set_workspace(Path(path))
     
@@ -306,13 +352,7 @@ class App:
     def _refresh_workspace_list(self):
         """刷新左侧工作区文件列表"""
         self._workspace_list.delete(0, tk.END)
-        if not self.workspace_root or not self.workspace_root.is_dir():
-            return
-        exts = {".choir", ".txt"}
-        files = sorted(
-            f for f in self.workspace_root.iterdir()
-            if f.is_file() and f.suffix.lower() in exts
-        )
+        files = self._get_workspace_files()
         for f in files:
             self._workspace_list.insert(tk.END, f.name)
     
@@ -321,12 +361,122 @@ class App:
         if not sel or not self.workspace_root:
             return
         idx = sel[0]
-        files = sorted(
-            f for f in self.workspace_root.iterdir()
-            if f.is_file() and f.suffix.lower() in {".choir", ".txt"}
-        )
+        files = self._get_workspace_files()
         if idx < len(files):
             self._load_file(files[idx])
+
+    def _get_workspace_files(self) -> list:
+        """获取工作区内的 .choir/.txt 文件列表（已排序）"""
+        if not self.workspace_root or not self.workspace_root.is_dir():
+            return []
+        exts = {".choir", ".txt"}
+        return sorted(
+            f for f in self.workspace_root.iterdir()
+            if f.is_file() and f.suffix.lower() in exts
+        )
+
+    def _apply_workspace_list_theme(self):
+        """应用工作区列表的主题颜色"""
+        if self._dark_mode:
+            self._workspace_list.configure(
+                bg="#2d2d2d",
+                fg="#d4d4d4",
+                selectbackground="#404040",
+                selectforeground="#ffffff",
+            )
+            self._workspace_list.hover_bg = "#3d3d3d"
+        else:
+            self._workspace_list.configure(
+                bg="#ffffff",
+                fg="#000000",
+                selectbackground="#cce8ff",
+                selectforeground="#000000",
+            )
+            self._workspace_list.hover_bg = "#e8f4fc"
+
+    def _on_workspace_motion(self, event):
+        """悬浮高亮"""
+        idx = self._workspace_list.nearest(event.y)
+        if idx == self._workspace_hover_index:
+            return
+        self._workspace_hover_index = idx
+        for i in range(self._workspace_list.size()):
+            if i == idx:
+                self._workspace_list.itemconfig(i, bg=getattr(self._workspace_list, "hover_bg", "#e8f4fc"))
+            else:
+                default_bg = "#2d2d2d" if self._dark_mode else "#ffffff"
+                self._workspace_list.itemconfig(i, bg=default_bg)
+
+    def _on_workspace_leave(self, event):
+        """离开列表时清除悬浮高亮"""
+        self._workspace_hover_index = -1
+        default_bg = "#2d2d2d" if self._dark_mode else "#ffffff"
+        for i in range(self._workspace_list.size()):
+            self._workspace_list.itemconfig(i, bg=default_bg)
+
+    def _on_workspace_context_menu(self, event):
+        """右键菜单：重命名、删除"""
+        idx = self._workspace_list.nearest(event.y)
+        if idx < 0:
+            return
+        files = self._get_workspace_files()
+        if idx >= len(files):
+            return
+        self._workspace_list.selection_clear(0, tk.END)
+        self._workspace_list.selection_set(idx)
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="重命名", command=lambda: self._on_workspace_rename(idx))
+        menu.add_command(label="删除", command=lambda: self._on_workspace_delete(idx))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _on_workspace_rename(self, idx: int):
+        """重命名工作区文件"""
+        files = self._get_workspace_files()
+        if idx >= len(files):
+            return
+        old_path = files[idx]
+        new_name = _ask_rename("请输入新文件名：", old_path.name, self.root)
+        if not new_name or not new_name.strip():
+            return
+        new_name = new_name.strip()
+        if not new_name.endswith(".choir") and not new_name.endswith(".txt"):
+            new_name += ".choir"
+        new_path = old_path.parent / new_name
+        if new_path == old_path:
+            return
+        if new_path.exists():
+            messagebox.showerror("重命名失败", f"文件已存在：{new_name}")
+            return
+        try:
+            old_path.rename(new_path)
+            if self.current_file_path == old_path:
+                self.current_file_path = new_path
+                self.root.title(f"简谱演奏 - {new_path.name}")
+            self._refresh_workspace_list()
+            self.status_label.config(text="已重命名")
+            self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+        except Exception as e:
+            messagebox.showerror("重命名失败", str(e))
+
+    def _on_workspace_delete(self, idx: int):
+        """删除工作区文件"""
+        files = self._get_workspace_files()
+        if idx >= len(files):
+            return
+        path = files[idx]
+        if not messagebox.askyesno("确认删除", f"确定要删除文件吗？\n{path.name}"):
+            return
+        try:
+            path.unlink()
+            if self.current_file_path == path:
+                self.current_file_path = None
+                self.text.delete(1.0, tk.END)
+                self.root.title("简谱演奏 - 未命名")
+            self._refresh_workspace_list()
+            self.status_label.config(text="已删除")
+            self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+        except Exception as e:
+            messagebox.showerror("删除失败", str(e))
     
     def _build_ui(self):
         colors = self._theme_colors()
@@ -350,11 +500,19 @@ class App:
             self._workspace_frame,
             width=18,
             height=20,
-            font=_mono_font(10),
+            font=_mono_font(12),
             selectmode=tk.SINGLE,
+            activestyle="none",
+            highlightthickness=0,
         )
-        self._workspace_list.pack(fill=tk.BOTH, expand=True)
+        self._workspace_list.pack(fill=tk.BOTH, expand=True, pady=(0, 2))
         self._workspace_list.bind("<Double-Button-1>", self._on_workspace_file_select)
+        self._workspace_list.bind("<Motion>", self._on_workspace_motion)
+        self._workspace_list.bind("<Leave>", self._on_workspace_leave)
+        self._workspace_list.bind("<Button-3>", self._on_workspace_context_menu)
+        self._workspace_list.bind("<Button-2>", self._on_workspace_context_menu)  # macOS 右键
+        self._workspace_hover_index: int = -1
+        self._apply_workspace_list_theme()
         ws_scroll = ttk.Scrollbar(self._workspace_frame, orient=tk.VERTICAL, command=self._workspace_list.yview)
         self._workspace_list.configure(yscrollcommand=ws_scroll.set)
         ws_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -533,15 +691,54 @@ class App:
         except Exception:
             max_chars = 80
         
-        def simple_split(s: str) -> tuple[str, list[str]]:
-            depth = 0
+        def simple_split(s: str) -> tuple[str, list[str], str]:
+            """拆分行：返回 (prefix, bars, suffix)。支持 [xxx](|bar1|bar2|) 记号内的小节"""
             parts = []
             cur = []
-            for c in s:
-                if c in "[(":
+            i = 0
+            n = len(s)
+            in_notation_scope = False
+            notation_paren_depth = 0
+            depth = 0
+
+            while i < n:
+                c = s[i]
+                # 检测 ]( 进入记号作用域
+                if c == "]" and i + 1 < n and s[i + 1] == "(":
+                    cur.append(c)
+                    i += 1
+                    in_notation_scope = True
+                    notation_paren_depth = 1
+                    cur.append("(")
+                    i += 1
+                    continue
+                if in_notation_scope:
+                    if c == "(":
+                        notation_paren_depth += 1
+                        cur.append(c)
+                    elif c == ")":
+                        notation_paren_depth -= 1
+                        if notation_paren_depth == 0:
+                            in_notation_scope = False
+                        cur.append(c)
+                    elif c == "|":
+                        parts.append("".join(cur))
+                        cur = []
+                    else:
+                        cur.append(c)
+                    i += 1
+                    continue
+                # 非记号作用域：仅 depth==0 时拆分 |
+                if c == "[":
                     depth += 1
                     cur.append(c)
-                elif c in "])":
+                elif c == "]":
+                    depth -= 1
+                    cur.append(c)
+                elif c == "(":
+                    depth += 1
+                    cur.append(c)
+                elif c == ")":
                     depth -= 1
                     cur.append(c)
                 elif c == "|" and depth == 0:
@@ -549,34 +746,40 @@ class App:
                     cur = []
                 else:
                     cur.append(c)
+                i += 1
+
             if cur:
                 parts.append("".join(cur))
             prefix = parts[0].rstrip() if parts else ""
-            bars = [p.strip() for p in parts[1:] if p.strip() and p.strip() != "8"]
-            if bars and not parts[-1].strip():
-                pass  # 结尾小节号 | 产生的空 bar 已忽略
-            return prefix, bars
+            suffix = ""
+            if len(parts) >= 2 and "](|" in (parts[0] if parts else "") and parts[-1].strip() == ")":
+                suffix = ")"
+                bars = [p.strip() for p in parts[1:-1]]
+            else:
+                bars = [p.strip() for p in parts[1:] if p.strip()]
+            return prefix, bars, suffix
         
         def align_section(part_lines: list[tuple[int, str]]) -> list[str]:
             all_data = []
             for _, line in part_lines:
-                prefix, bars = simple_split(line)
-                all_data.append((prefix, bars))
-            max_bars = max(len(bars) for _, bars in all_data)
+                prefix, bars, suffix = simple_split(line)
+                all_data.append((prefix, bars, suffix))
+            max_bars = max(len(bars) for _, bars, _ in all_data)
             if max_bars == 0:
                 return [L for _, L in part_lines]
-            for prefix, bars in all_data:
+            for item in all_data:
+                prefix, bars, _ = item
                 while len(bars) < max_bars:
                     bars.append("")
-            col_widths = [max(max(len(bars[j]) for _, bars in all_data), 1) for j in range(max_bars)]
+            col_widths = [max(max(len(bars[j]) for _, bars, _ in all_data), 1) for j in range(max_bars)]
             result = []
-            for (_, line), (prefix, bars) in zip(part_lines, all_data):
+            for (_, line), (prefix, bars, suffix) in zip(part_lines, all_data):
                 if not bars and max_bars > 0:
                     result.append(line)
                     continue
                 padded = [b.ljust(col_widths[j]) for j, b in enumerate(bars)]
                 sep = " |" if prefix.rstrip().endswith("&") else "|"
-                result.append(prefix.rstrip() + sep + "|".join(padded))
+                result.append(prefix.rstrip() + sep + "|".join(padded) + suffix)
             return result
         
         new_sections: list[list[str]] = []
@@ -585,8 +788,8 @@ class App:
             if self.auto_wrap_var.get():
                 any_long = any(len(L) > max_chars for _, L in part_lines)
                 if any_long:
-                    all_data = [(simple_split(L)) for _, L in part_lines]
-                    n_bars = max(len(bars) for _, bars in all_data)
+                    all_data = [simple_split(L) for _, L in part_lines]
+                    n_bars = max(len(bars) for _, bars, _ in all_data)
                     split_at = 1
                     for k in range(1, n_bars + 1):
                         ok = True
@@ -602,14 +805,14 @@ class App:
                             break
                     head_section = []
                     tail_section = []
-                    for (prefix, bars) in all_data:
+                    for (prefix, bars, suffix) in all_data:
                         h = bars[:split_at] if len(bars) >= split_at else bars
                         t = bars[split_at:] if len(bars) > split_at else []
                         sep = " |" if prefix.rstrip().endswith("&") else "|"
                         if h:
-                            head_section.append(prefix.rstrip() + sep + "|".join(h))
+                            head_section.append(prefix.rstrip() + sep + "|".join(h) + suffix)
                         if t:
-                            tail_section.append(prefix.rstrip() + sep + "|".join(t))
+                            tail_section.append(prefix.rstrip() + sep + "|".join(t) + suffix)
                     if head_section:
                         new_sections.append(align_section([(0, s) for s in head_section]))
                     if tail_section:
@@ -632,9 +835,6 @@ class App:
             new_content = "\n".join(header_lines).rstrip() + "\n\n" + new_content
         self.text.delete(1.0, tk.END)
         self.text.insert(tk.END, new_content)
-        return "break"
-        self.text.delete(1.0, tk.END)
-        self.text.insert(tk.END, "\n".join(out_lines))
         return "break"
     
     def _highlight_brackets(self):
@@ -832,6 +1032,10 @@ class App:
         self.status_label.config(text="已停止")
     
     def run(self):
+        def _grab_focus():
+            self.root.lift()
+            self.root.focus_force()
+        self.root.after(100, _grab_focus)
         self.root.mainloop()
 
 
