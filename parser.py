@@ -26,8 +26,14 @@ C_MAJOR_BASE = {1: 60, 2: 62, 3: 64, 4: 65, 5: 67, 6: 69, 7: 71}
 _PC_TO_DEGREE = {0: 1, 2: 2, 4: 3, 5: 4, 7: 5, 9: 6, 11: 7}
 _DEGREE_TO_PC = {1: 0, 2: 2, 3: 4, 4: 5, 5: 7, 6: 9, 7: 11}
 
-# 调性偏移：bA=Ab, bB=Bb 等，简化为降号调
+# 调性偏移：bA=Ab, bB=Bb 等，简化为降号调；b1–b7 为数字形式的降号调
 TONALITY_FLAT_OFFSET = {"A": -1, "B": -2, "C": 0, "D": -1, "E": -2, "F": -1, "G": -2}
+# 1–7 对应 CDEFGAB，b+数字 的降号调半音偏移
+TONALITY_FLAT_BY_DEGREE = {1: -1, 2: -1, 3: -2, 4: -1, 5: -2, 6: -1, 7: -2}
+# #+数字 的升号调半音偏移
+TONALITY_SHARP_BY_DEGREE = {1: 1, 2: 2, 3: 5, 4: 6, 5: 8, 6: 10, 7: 0}
+# 1–7 无前缀：C/D/E/F/G/A/B 大调半音偏移
+TONALITY_MAJOR_OFFSET = {1: 0, 2: 2, 3: 4, 4: 5, 5: 7, 6: 9, 7: 11}
 
 # 音量映射
 VOLUME_MAP = {
@@ -126,14 +132,30 @@ def _parse_global(text: str) -> tuple[GlobalSettings, str]:
 
 
 def _tonality_to_semitones(tonality: str) -> int:
-    """调性转半音偏移。1=C, bA=Ab 等"""
+    """调性转半音偏移。1=C, b1=Cb, bA=Ab, #1=C#, 或直接整数如 +2/-1 表示统一偏移"""
     t = tonality.strip()
+    # 1–7 无前缀：C/D/E/F/G/A/B 大调
     if t.isdigit() and 1 <= int(t) <= 7:
-        return 0  # C 大调
-    m = re.match(r"b([A-Ga-g])", t, re.I)
+        return TONALITY_MAJOR_OFFSET[int(t)]
+    # 直接整数：+2, -1, 8 等表示统一半音偏移（带符号或 >7 的数字）
+    m_int = re.match(r"([+-]?\d+)\s*$", t)
+    if m_int:
+        return int(m_int.group(1))
+    # b + 数字：b1=Cb, b2=Db 等
+    m_bnum = re.match(r"b(\d)\s*$", t, re.I)
+    if m_bnum:
+        d = int(m_bnum.group(1))
+        return TONALITY_FLAT_BY_DEGREE.get(d, 0)
+    # b + 字母：bA=Ab, bB=Bb 等
+    m = re.match(r"b([A-Ga-g])\s*$", t, re.I)
     if m:
         note = m.group(1).upper()
         return TONALITY_FLAT_OFFSET.get(note, 0)
+    # # + 数字：#1=C#, #2=D# 等
+    m_sharp = re.match(r"#(\d)\s*$", t)
+    if m_sharp:
+        d = int(m_sharp.group(1))
+        return TONALITY_SHARP_BY_DEGREE.get(d, 0)
     return 0
 
 
