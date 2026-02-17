@@ -149,17 +149,35 @@ def schedule(score: ParsedScore) -> list[ScheduledNote]:
 
         beats_per_second = bpm / 60.0
         aligned = _align_parts(section)
+        # 首次收集：只停在 [dc]，不因 [fine] 停（[fine] 仅在 Da Capo 重奏时作为结束）
         notes1, next_beat, hit_fine, hit_dc = _collect_notes_from_aligned(
             aligned, global_beat, beats_per_second, default_beats_per_bar,
-            stop_at_fine=True, stop_at_dc=True,
+            stop_at_fine=False, stop_at_dc=True,
         )
         all_notes.extend(notes1)
         global_beat = next_beat
 
         if hit_dc:
-            notes_dc, _, _, _ = _collect_notes_from_aligned(
-                aligned, 0.0, beats_per_second, default_beats_per_bar, stop_at_fine=True
-            )
+            # Da Capo：从全曲开头重奏，直至 [fine] 结束
+            dc_beat = 0.0
+            notes_dc: list[ScheduledNote] = []
+            for s_idx in range(sec_idx + 1):
+                sec = sections[s_idx]
+                if s_idx < len(section_settings):
+                    s = section_settings[s_idx]
+                    bps = s.bpm / 60.0
+                    def_beats = s.beat_numerator if not s.no_bar_check else 4.0
+                else:
+                    bps = score.settings.bpm / 60.0
+                    def_beats = score.settings.beat_numerator if not score.settings.no_bar_check else 4.0
+                aligned = _align_parts(sec)
+                nd, next_b, hit_f, _ = _collect_notes_from_aligned(
+                    aligned, dc_beat, bps, def_beats, stop_at_fine=True
+                )
+                notes_dc.extend(nd)
+                dc_beat = next_b
+                if hit_f:
+                    break
             offset = global_beat / beats_per_second
             for n in notes_dc:
                 all_notes.append(ScheduledNote(

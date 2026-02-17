@@ -77,6 +77,7 @@ class BarContent:
     events: list = field(default_factory=list)
     dc: bool = False   # [dc] Da Capo：从此处跳回开头
     fine: bool = False  # [fine]：在此处结束
+    tie_adjustment: float = 0.0  # 连音线跨小节：+ 表示从上一小节转入，- 表示转出到下一小节
 
 
 @dataclass
@@ -327,6 +328,7 @@ def _parse_notation_scope(
     deviation_explicit: bool,
     harmony: int,  # 0, +3, -3, +5, -5
     tonality_offset: int,
+    prev_bars: list[BarContent] | None = None,
 ) -> tuple[list[BarContent], list[int]]:
     """
     解析一段内容（可含 | 跨小节），返回 (BarContent 列表, 篇章边界 bar 索引)。
@@ -462,7 +464,6 @@ def _parse_notation_scope(
             depth += 1
             notation, scope, _, rest_after, apply_underscore, rest_starts_with_double_newline = _extract_bracket_content(content[i:])
             consumed = len(content[i:]) - len(rest_after)
-            i += consumed
             depth -= 1
             if notation:
                 notation_lower = notation.lower()
@@ -504,10 +505,36 @@ def _parse_notation_scope(
                         section_starts.append(len(bars) + len(sub_bars))
                     if apply_underscore:
                         _halve_bar_events(sub_bars)
+                    # 将当前小节（如 0 - 0）与 scope 第一小节合并
+                    if current_bar.events or bar_beats > 0:
+                        if sub_bars:
+                            sub_bars[0].events = current_bar.events + sub_bars[0].events
+                        else:
+                            bars.append(current_bar)
+                    # 括号在小节中中止时，) 后到第一个 | 的内容与 scope 最后一小节合并
+                    if rest_after and sub_bars and not rest_after.lstrip().startswith("|"):
+                        if "|" in rest_after:
+                            rest_to_merge, rest_remain = rest_after.split("|", 1)
+                            rest_to_merge = rest_to_merge.rstrip()
+                            rest_remain = "|" + rest_remain
+                        else:
+                            rest_to_merge = rest_after
+                            rest_remain = ""
+                        if rest_to_merge.strip():
+                            rest_bars, _ = _parse_notation_scope(
+                                rest_to_merge, base_duration, beats_per_bar,
+                                part_octave, volume, deviation_explicit, harmony, tonality_offset,
+                            )
+                            if rest_bars:
+                                sub_bars[-1].events.extend(rest_bars[0].events)
+                                for rb in rest_bars[1:]:
+                                    sub_bars.append(rb)
+                        consumed += len(rest_to_merge)
                     for sb in sub_bars:
                         bars.append(sb)
                     current_bar = BarContent()
                     bar_beats = 0.0
+            i += consumed
             continue
         # (notes)n n连音 或 (notes)_ 括号应用到 _（_ 优先级高于 []）
         if content[i] == "(":
@@ -560,25 +587,38 @@ def _parse_notation_scope(
                     ev = parse_note_token(t, part_octave, 0)
                     if ev and isinstance(ev, NoteEvent):
                         notes_in_tuplet.append(("note", [ev.midi], ev.duration_beats))
+                    elif ev and isinstance(ev, RestEvent):
+                        notes_in_tuplet.append(("rest", [], ev.duration_beats))
             if notes_in_tuplet:
-                # 均分为 default；(notes)_：n=音符数并缩短一半；(notes)n：显式 n
+                # 均分为 default；(notes)_：每个音为八分（四分除以2）；(notes)n：显式 n
                 if not has_explicit_n:
                     n_val = len(notes_in_tuplet)
-                each = base_duration / n_val
                 if apply_underscore:
-                    each /= 2
+                    each = base_duration / 2  # _ 等同于填写2，四分除以2=八分
+                else:
+                    each = base_duration / n_val
                 for kind, midis, _ in notes_in_tuplet:
-                    midis = add_harmony(midis, harmony, i)
-                    if kind == "chord":
-                        current_bar.events.append(ChordEvent(midis=midis, duration_beats=each, volume=volume))
+                    if kind == "rest":
+                        current_bar.events.append(RestEvent(duration_beats=each))
                     else:
-                        current_bar.events.append(NoteEvent(midi=midis[0], duration_beats=each, volume=volume))
+                        midis = add_harmony(midis, harmony, i)
+                        if kind == "chord":
+                            current_bar.events.append(ChordEvent(midis=midis, duration_beats=each, volume=volume))
+                        elif len(midis) == 1:
+                            current_bar.events.append(NoteEvent(midi=midis[0], duration_beats=each, volume=volume))
+                        else:
+                            current_bar.events.append(ChordEvent(midis=midis, duration_beats=each, volume=volume))
                     bar_beats += each
             continue
-        # 8 重复上小节
+        # 8 重复上小节（可跨篇章使用上一篇章最后一小节）
         if content[i] == "8" and (i + 1 >= n or content[i + 1] in " \t\n|"):
+            src_bar = None
             if bars:
-                current_bar = BarContent(events=[e for e in bars[-1].events])
+                src_bar = bars[-1]
+            elif prev_bars:
+                src_bar = prev_bars[-1]
+            if src_bar:
+                current_bar = BarContent(events=[e for e in src_bar.events])
                 bar_beats = sum(
                     e.duration_beats for e in current_bar.events
                     if isinstance(e, (NoteEvent, ChordEvent, RestEvent))
@@ -618,6 +658,7 @@ def _parse_notation_scope(
                 prev_bar = bars[-1]
                 if prev_bar.events:
                     last_ev = prev_bar.events[-1]
+            add_dur = base_duration
             if "/" in tok:
                 parts = tok.split("/")
                 chord = []
@@ -627,11 +668,15 @@ def _parse_notation_scope(
                         chord.append(ev.midi)
                 if chord and last_ev is not None:
                     if isinstance(last_ev, NoteEvent):
-                        last_ev.duration_beats += base_duration
+                        last_ev.duration_beats += add_dur
                     elif isinstance(last_ev, ChordEvent):
-                        last_ev.duration_beats += base_duration
+                        last_ev.duration_beats += add_dur
                     if last_in_current:
-                        bar_beats += base_duration
+                        bar_beats += add_dur
+                    # 跨小节：上一小节转出、当前小节转入
+                    if not last_in_current and bars:
+                        bars[-1].tie_adjustment -= add_dur
+                        current_bar.tie_adjustment += add_dur
             else:
                 ev = parse_note_token(tok, part_octave, 0)
                 if ev and isinstance(ev, NoteEvent) and last_ev is not None:
@@ -642,8 +687,12 @@ def _parse_notation_scope(
                         last_ev.duration_beats += add_dur
                     if last_in_current:
                         bar_beats += add_dur
+                    # 跨小节：上一小节转出、当前小节转入
+                    elif not last_in_current and bars:
+                        bars[-1].tie_adjustment -= add_dur
+                        current_bar.tie_adjustment += add_dur
             continue
-        # 和弦 1/3/5（每个音可单独带升降号）
+        # 和弦 1/3/5（每个音可单独带升降号）；末尾 _ 表示四分除以2=八分
         if "/" in tok:
             parts = tok.split("/")
             acc_tok = _any_accidental_in_tokens(parts) if harmony != 0 else None
@@ -660,6 +709,9 @@ def _parse_notation_scope(
                 if ev and isinstance(ev, NoteEvent):
                     chord_midis.append(ev.midi)
                     max_dur = max(max_dur, ev.duration_beats)
+            # 和弦末尾 _（如 3/5_）表示整和弦为八分
+            if tok.rstrip().endswith("_"):
+                max_dur = base_duration / 2
             chord_midis = add_harmony(chord_midis, harmony, i)
             if chord_midis:
                 current_bar.events.append(ChordEvent(midis=chord_midis, duration_beats=max_dur, volume=volume))
@@ -694,6 +746,7 @@ def _parse_part_line(
     beats_per_bar: float,
     no_bar_check: bool,
     tonality_offset: int,
+    prev_bars: list[BarContent] | None = None,
 ) -> tuple[Part, list[int]]:
     part = Part()
     line = line.strip()
@@ -716,7 +769,7 @@ def _parse_part_line(
             part_octave = 1 if "8" in kind else 2
         line = inner
     bars, section_starts = _parse_notation_scope(
-        line, base_duration, beats_per_bar, part_octave, volume, False, 0, tonality_offset,
+        line, base_duration, beats_per_bar, part_octave, volume, False, 0, tonality_offset, prev_bars,
     )
     part.bars = bars
     return part, section_starts
@@ -863,12 +916,19 @@ def parse(text: str) -> ParsedScore:
         if not part_lines:
             continue
 
+        # 上一篇章各声部的 bars，供 |8| 跨篇章重复
+        prev_bars_per_part: list[list[BarContent]] = []
+        if sections:
+            n_prev_parts = max(len(p) for p in sections)
+            prev_bars_per_part = [sections[-1][pi].bars if pi < len(sections[-1]) else [] for pi in range(n_prev_parts)]
+
         sec_parts: list[Part] = []
-        for line in part_lines:
+        for part_idx, line in enumerate(part_lines):
             if line.strip().startswith("&"):
                 line = line.strip()[1:].lstrip()
+            prev_bars = prev_bars_per_part[part_idx] if part_idx < len(prev_bars_per_part) else None
             part, _ = _parse_part_line(
-                line, base_duration, beats_per_bar, sec_settings.no_bar_check, tonality_offset
+                line, base_duration, beats_per_bar, sec_settings.no_bar_check, tonality_offset, prev_bars,
             )
             if part.bars:
                 sec_parts.append(part)

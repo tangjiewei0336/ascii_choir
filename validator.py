@@ -58,25 +58,22 @@ def _check_bar_duration(text: str, score) -> list[Diagnostic]:
             for bar in part.bars:
                 bars_with_expected.append((bar, expected))
 
-    depth = 0
     bar_start = None
     bar_idx = 0
     for i, c in enumerate(text):
-        if c in "[(":
-            depth += 1
-        elif c in "])":
-            depth -= 1
-        elif c == "|" and depth == 0:
+        if c == "|":
             if bar_start is not None:
                 if bar_idx < len(bars_with_expected):
                     bar, beats_per_bar = bars_with_expected[bar_idx]
                     if beats_per_bar is not None:
                         dur = bar_duration(bar)
-                        if abs(dur - beats_per_bar) > tol:
+                        tie_adj = getattr(bar, "tie_adjustment", 0.0)
+                        effective_dur = dur + tie_adj
+                        if abs(effective_dur - beats_per_bar) > tol:
                             line, col = _pos_to_line_col(text, bar_start)
                             diags.append(Diagnostic(
                                 line, col,
-                                f"小节时值不一致：当前 {dur:.2f} 拍，应为 {beats_per_bar:.1f} 拍",
+                                f"小节时值不一致：当前 {effective_dur:.2f} 拍，应为 {beats_per_bar:.1f} 拍",
                                 "warning",
                                 start_pos=bar_start,
                                 end_pos=i,
@@ -87,11 +84,13 @@ def _check_bar_duration(text: str, score) -> list[Diagnostic]:
         bar, beats_per_bar = bars_with_expected[bar_idx]
         if beats_per_bar is not None:
             dur = bar_duration(bar)
-            if abs(dur - beats_per_bar) > tol:
+            tie_adj = getattr(bar, "tie_adjustment", 0.0)
+            effective_dur = dur + tie_adj
+            if abs(effective_dur - beats_per_bar) > tol:
                 line, col = _pos_to_line_col(text, bar_start)
                 diags.append(Diagnostic(
                     line, col,
-                    f"小节时值不一致：当前 {dur:.2f} 拍，应为 {beats_per_bar:.1f} 拍",
+                    f"小节时值不一致：当前 {effective_dur:.2f} 拍，应为 {beats_per_bar:.1f} 拍",
                     "warning",
                     start_pos=bar_start,
                     end_pos=len(text),
