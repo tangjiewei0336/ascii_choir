@@ -343,13 +343,17 @@ def _parse_notation_scope(
     n = len(content)
     prev_note_midi: Optional[int] = None  # 用于 ~ 连音线
     volume = default_volume
+    tie_target_ev: Optional[NoteEvent | ChordEvent] = None  # ~ 跨小节时，后续 - 继续延长该音
+    tie_target_bar: Optional[BarContent] = None
 
     def flush_bar():
-        nonlocal current_bar, bar_beats
+        nonlocal current_bar, bar_beats, tie_target_ev, tie_target_bar
         if current_bar.events or bar_beats > 0 or current_bar.dc or current_bar.fine:
             bars.append(current_bar)
         current_bar = BarContent()
         bar_beats = 0.0
+        tie_target_ev = None
+        tie_target_bar = None
 
     def parse_note_token(tok: str, oct_off: int, acc: int) -> Optional[NoteEvent | RestEvent]:
         tok = tok.strip()
@@ -640,6 +644,12 @@ def _parse_notation_scope(
                 if hasattr(last, "duration_beats"):
                     last.duration_beats += base_duration  # 增加一拍
                     bar_beats += base_duration
+            elif tie_target_ev is not None and tie_target_bar is not None:
+                # ~ 跨小节后，- 继续延长上一小节最后一音
+                tie_target_ev.duration_beats += base_duration
+                tie_target_bar.tie_adjustment -= base_duration
+                current_bar.tie_adjustment += base_duration
+                bar_beats += base_duration
             continue
         if tok == "_":
             if current_bar.events:
@@ -673,10 +683,14 @@ def _parse_notation_scope(
                         last_ev.duration_beats += add_dur
                     if last_in_current:
                         bar_beats += add_dur
-                    # 跨小节：上一小节转出、当前小节转入
-                    if not last_in_current and bars:
+                        tie_target_ev = None
+                        tie_target_bar = None
+                    # 跨小节：上一小节转出、当前小节转入；后续 - 继续延长该音
+                    else:
                         bars[-1].tie_adjustment -= add_dur
                         current_bar.tie_adjustment += add_dur
+                        tie_target_ev = last_ev
+                        tie_target_bar = bars[-1]
             else:
                 ev = parse_note_token(tok, part_octave, 0)
                 if ev and isinstance(ev, NoteEvent) and last_ev is not None:
@@ -687,10 +701,14 @@ def _parse_notation_scope(
                         last_ev.duration_beats += add_dur
                     if last_in_current:
                         bar_beats += add_dur
-                    # 跨小节：上一小节转出、当前小节转入
-                    elif not last_in_current and bars:
+                        tie_target_ev = None
+                        tie_target_bar = None
+                    # 跨小节：上一小节转出、当前小节转入；后续 - 继续延长该音
+                    else:
                         bars[-1].tie_adjustment -= add_dur
                         current_bar.tie_adjustment += add_dur
+                        tie_target_ev = last_ev
+                        tie_target_bar = bars[-1]
             continue
         # 和弦 1/3/5（每个音可单独带升降号）；末尾 _ 表示四分除以2=八分
         if "/" in tok:
@@ -716,6 +734,8 @@ def _parse_notation_scope(
             if chord_midis:
                 current_bar.events.append(ChordEvent(midis=chord_midis, duration_beats=max_dur, volume=volume))
                 bar_beats += max_dur
+                tie_target_ev = None
+                tie_target_bar = None
             continue
         # 单音
         if harmony != 0 and _has_accidental(tok):
@@ -734,6 +754,8 @@ def _parse_notation_scope(
                 else:
                     current_bar.events.append(ChordEvent(midis=midis, duration_beats=ev.duration_beats, volume=ev.volume))
                 bar_beats += ev.duration_beats
+            tie_target_ev = None
+            tie_target_bar = None
 
     if current_bar.events or bar_beats > 0 or current_bar.dc or current_bar.fine:
         bars.append(current_bar)
@@ -853,24 +875,6 @@ def _split_sections(text: str) -> list[list[str]]:
         if part_lines:
             sections.append((block, part_lines))
     return sections
-
-
-def _split_parts(text: str) -> list[list[str]]:
-    """兼容旧逻辑：不按篇章，仅按空行分块"""
-    lines = text.split("\n")
-    current_block = []
-    all_blocks = []
-    for line in lines:
-        if line.strip().startswith("&"):
-            current_block.append(line)
-        else:
-            if current_block:
-                all_blocks.append(current_block)
-                current_block = []
-    if current_block:
-        all_blocks.append(current_block)
-    return all_blocks
-
 
 def _settings_to_duration(settings: GlobalSettings) -> tuple[float, float]:
     """从 GlobalSettings 得到 base_duration 和 beats_per_bar"""

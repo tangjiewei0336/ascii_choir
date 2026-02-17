@@ -6,7 +6,7 @@ import sys
 import subprocess
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 from pathlib import Path
 import threading
 
@@ -53,6 +53,12 @@ def _is_dark_mode() -> bool:
     return False
 
 
+DEFAULT_NEW_FILE = r"""\tonality{1}
+\beat{4/4}
+\bpm{120}
+
+"""
+
 # 示例简谱
 SAMPLE_SCORE = r"""\tonality{1}
 \beat{4/4}
@@ -70,13 +76,51 @@ SAMPLE_NO_BAR = r"""\no_bar_check
 
 SAMPLE_MULTI = r"""\tonality{1}
 \beat{4/4}
-\bpm{100}
+\bpm{30}
 
 & [8vb](|.3---|3---|.4---|4---|)
 & |(1 2 5 1 2 5 1 2 5 1 2 5)3|8|8|8|
 
-& [8vb](|.5---|5---|.6---|6- 5-|)
+& [8vb](|.5---|5---|[fine].6---|6- 5-[dc]|)
 & |8|8|8|8|
+"""
+
+SAMPLE_KEY_CHANGE = r"""\tonality{C}
+\beat{4/4}
+\bpm{60}
+
+|1 2 3 2|5 4 3 2|1 - - -|0 - - - |
+
+\tonality{#C}
+
+|1 2 3 4|5 4 3 2|1 - - -|0 - - - |
+
+\tonality{D}
+
+|1 2 3 4|5 4 3 2|1 - - -|0 - - - |
+
+\tonality{#D}
+
+|1 2 3 4|5 4 3 2|1 - - -|0 - - - |
+
+\tonality{E}
+
+|1 2 3 4|5 4 3 2|1 - - -|0 - - - |
+"""
+
+SAMPLE_AUTO_HARMONY = r"""\tonality{1}
+\beat{4/4}
+\bpm{60}
+
+|0 - 0 [-3]((1 2)_ | 3 (4 5)_ 0_ 5 5_ | ~5 3 5 1. | 7 1._ 7_ ~7_ 5 5_ | ~5 -) 0 3_ 2_|
+|1 0 (.5/1 .7/2 1/3 2/4)_| ~2/4 1/3 .7/2 (.5/1 .5/1)_| ~.5/1 - - -|
+"""
+
+SAMPLE_HARMONY = r"""\tonality{1}
+\beat{4/4}
+\bpm{60}
+
+|0 - 0 (.6/1 .7/2)_ | 1/3 (2/4 3/5 0)_  3/5 3/5_ | ~3/~5 1/3 3/5 6/1. |
 """
 
 
@@ -95,6 +139,9 @@ EXAMPLE_FILES = {
     "单声部.choir": SAMPLE_SCORE,
     "无小节.choir": SAMPLE_NO_BAR,
     "多声部.choir": SAMPLE_MULTI,
+    "变调.choir": SAMPLE_KEY_CHANGE,
+    "自动和声.choir": SAMPLE_AUTO_HARMONY,
+    "和声.choir": SAMPLE_HARMONY,
 }
 
 
@@ -153,13 +200,31 @@ class App:
         self.root.bind("<Control-Shift-C>", lambda e: self._on_copy())
     
     def _on_new(self):
-        """新建文件：清空编辑器，取消当前文件关联"""
+        """新建文件：先询问名称，然后直接保存"""
+        name = simpledialog.askstring("新建", "请输入文件名：", parent=self.root)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        if not name.endswith(".choir") and not name.endswith(".txt"):
+            name += ".choir"
         if self._auto_save_timer:
             self.root.after_cancel(self._auto_save_timer)
             self._auto_save_timer = None
         self.text.delete(1.0, tk.END)
-        self.current_file_path = None
-        self.root.title("简谱演奏 - 未命名")
+        self.text.insert(tk.END, DEFAULT_NEW_FILE)
+        if self.workspace_root and self.workspace_root.is_dir():
+            path = self.workspace_root / name
+        else:
+            path = filedialog.asksaveasfilename(
+                title="保存新建文件",
+                initialfile=name,
+                defaultextension=".choir",
+                filetypes=[("简谱文件", "*.choir *.txt"), ("所有文件", "*.*")],
+            )
+            if not path:
+                return
+            path = Path(path)
+        self._save_to(path)
         self._do_highlights()
     
     def _on_open(self):
