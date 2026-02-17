@@ -26,11 +26,8 @@ def _pos_to_line_col(text: str, pos: int) -> tuple[int, int]:
 
 
 def _check_bar_duration(text: str, score) -> list[Diagnostic]:
-    """检查小节时值是否与拍号一致。拍子用加算计算。"""
+    """检查小节时值是否与拍号一致。支持篇章间不同拍号。"""
     diags: list[Diagnostic] = []
-    if score.settings.no_bar_check:
-        return diags
-    beats_per_bar = score.settings.beat_numerator / score.settings.beat_denominator
     tol = 0.001
 
     def bar_duration(bar) -> float:
@@ -40,11 +37,26 @@ def _check_bar_duration(text: str, score) -> list[Diagnostic]:
                 total += ev.duration_beats
         return total
 
-    all_bars = []
+    # 构建 (bar, 该小节应有的拍数) 列表，按篇章使用对应拍号
+    bars_with_expected: list[tuple] = []
     sections = getattr(score, "sections", None) or ([score.parts] if score.parts else [])
-    for section in sections:
+    section_settings = getattr(score, "section_settings", None) or []
+    default_beats = score.settings.beat_numerator / score.settings.beat_denominator
+    if score.settings.no_bar_check:
+        return diags
+
+    for sec_idx, section in enumerate(sections):
+        if sec_idx < len(section_settings):
+            s = section_settings[sec_idx]
+            if s.no_bar_check:
+                expected = None  # 不检查该篇章小节时值
+            else:
+                expected = s.beat_numerator / s.beat_denominator
+        else:
+            expected = default_beats
         for part in section:
-            all_bars.extend(part.bars)
+            for bar in part.bars:
+                bars_with_expected.append((bar, expected))
 
     depth = 0
     bar_start = None
@@ -56,30 +68,34 @@ def _check_bar_duration(text: str, score) -> list[Diagnostic]:
             depth -= 1
         elif c == "|" and depth == 0:
             if bar_start is not None:
-                if bar_idx < len(all_bars):
-                    dur = bar_duration(all_bars[bar_idx])
-                    if abs(dur - beats_per_bar) > tol:
-                        line, col = _pos_to_line_col(text, bar_start)
-                        diags.append(Diagnostic(
-                            line, col,
-                            f"小节时值不一致：当前 {dur:.2f} 拍，应为 {beats_per_bar:.1f} 拍",
-                            "warning",
-                            start_pos=bar_start,
-                            end_pos=i,
-                        ))
+                if bar_idx < len(bars_with_expected):
+                    bar, beats_per_bar = bars_with_expected[bar_idx]
+                    if beats_per_bar is not None:
+                        dur = bar_duration(bar)
+                        if abs(dur - beats_per_bar) > tol:
+                            line, col = _pos_to_line_col(text, bar_start)
+                            diags.append(Diagnostic(
+                                line, col,
+                                f"小节时值不一致：当前 {dur:.2f} 拍，应为 {beats_per_bar:.1f} 拍",
+                                "warning",
+                                start_pos=bar_start,
+                                end_pos=i,
+                            ))
                 bar_idx += 1
             bar_start = i
-    if bar_start is not None and bar_idx < len(all_bars):
-        dur = bar_duration(all_bars[bar_idx])
-        if abs(dur - beats_per_bar) > tol:
-            line, col = _pos_to_line_col(text, bar_start)
-            diags.append(Diagnostic(
-                line, col,
-                f"小节时值不一致：当前 {dur:.2f} 拍，应为 {beats_per_bar:.1f} 拍",
-                "warning",
-                start_pos=bar_start,
-                end_pos=len(text),
-            ))
+    if bar_start is not None and bar_idx < len(bars_with_expected):
+        bar, beats_per_bar = bars_with_expected[bar_idx]
+        if beats_per_bar is not None:
+            dur = bar_duration(bar)
+            if abs(dur - beats_per_bar) > tol:
+                line, col = _pos_to_line_col(text, bar_start)
+                diags.append(Diagnostic(
+                    line, col,
+                    f"小节时值不一致：当前 {dur:.2f} 拍，应为 {beats_per_bar:.1f} 拍",
+                    "warning",
+                    start_pos=bar_start,
+                    end_pos=len(text),
+                ))
     return diags
 
 

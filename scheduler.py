@@ -122,23 +122,32 @@ def schedule(score: ParsedScore) -> list[ScheduledNote]:
     将 ParsedScore 转为按时间排序的 ScheduledNote 列表。
     按篇章顺序渲染，每篇章内多声部对齐，篇章之间拼接。
     支持 [dc] Da Capo 和 [fine] 结束记号。
+    支持篇章间变速（bpm）、转拍（beat）。
     """
-    bpm = score.settings.bpm
-    beats_per_second = bpm / 60.0
-    
-    if score.settings.no_bar_check:
-        default_beats_per_bar = 4.0
-    else:
-        default_beats_per_bar = score.settings.beat_numerator
-    
     all_notes: list[ScheduledNote] = []
     global_beat = 0.0
-    
+
     sections = getattr(score, "sections", None) or ([score.parts] if score.parts else [])
-    
-    for section in sections:
+    section_settings = getattr(score, "section_settings", None) or []
+
+    for sec_idx, section in enumerate(sections):
         if not section:
             continue
+        if sec_idx < len(section_settings):
+            s = section_settings[sec_idx]
+            bpm = s.bpm
+            if s.no_bar_check:
+                default_beats_per_bar = 4.0
+            else:
+                default_beats_per_bar = s.beat_numerator
+        else:
+            bpm = score.settings.bpm
+            if score.settings.no_bar_check:
+                default_beats_per_bar = 4.0
+            else:
+                default_beats_per_bar = score.settings.beat_numerator
+
+        beats_per_second = bpm / 60.0
         aligned = _align_parts(section)
         notes1, next_beat, hit_fine, hit_dc = _collect_notes_from_aligned(
             aligned, global_beat, beats_per_second, default_beats_per_bar,
@@ -146,7 +155,7 @@ def schedule(score: ParsedScore) -> list[ScheduledNote]:
         )
         all_notes.extend(notes1)
         global_beat = next_beat
-        
+
         if hit_dc:
             notes_dc, _, _, _ = _collect_notes_from_aligned(
                 aligned, 0.0, beats_per_second, default_beats_per_bar, stop_at_fine=True
@@ -162,6 +171,6 @@ def schedule(score: ParsedScore) -> list[ScheduledNote]:
             break
         if hit_fine:
             break
-    
+
     all_notes.sort(key=lambda n: (n.start_time, -len(n.midis)))
     return all_notes

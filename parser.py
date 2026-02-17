@@ -34,6 +34,9 @@ TONALITY_FLAT_BY_DEGREE = {1: -1, 2: -1, 3: -2, 4: -1, 5: -2, 6: -1, 7: -2}
 TONALITY_SHARP_BY_DEGREE = {1: 1, 2: 2, 3: 5, 4: 6, 5: 8, 6: 10, 7: 0}
 # 1–7 无前缀：C/D/E/F/G/A/B 大调半音偏移
 TONALITY_MAJOR_OFFSET = {1: 0, 2: 2, 3: 4, 4: 5, 5: 7, 6: 9, 7: 11}
+# 字母 C–B 大调；#C–#B 升号调
+TONALITY_LETTER_OFFSET = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+TONALITY_SHARP_LETTER = {"C": 1, "D": 3, "E": 5, "F": 6, "G": 8, "A": 10, "B": 0}
 
 # 音量映射
 VOLUME_MAP = {
@@ -86,10 +89,23 @@ class ParsedScore:
     settings: GlobalSettings
     parts: list[Part] = field(default_factory=list)  # 兼容：扁平化所有篇章
     sections: list[list[Part]] = field(default_factory=list)  # 篇章列表，每篇章 & 数量相同
+    section_settings: list[GlobalSettings] = field(default_factory=list)  # 每篇章的独立设定（覆盖前面的）
 
 
-def _parse_global(text: str) -> tuple[GlobalSettings, str]:
-    settings = GlobalSettings()
+def _copy_settings(s: GlobalSettings) -> GlobalSettings:
+    """复制全局设定"""
+    return GlobalSettings(
+        tonality=s.tonality,
+        beat_numerator=s.beat_numerator,
+        beat_denominator=s.beat_denominator,
+        bpm=s.bpm,
+        no_bar_check=s.no_bar_check,
+    )
+
+
+def _parse_global(text: str, inherit: GlobalSettings | None = None) -> tuple[GlobalSettings, str]:
+    """解析全局设定。inherit 为 None 时从默认值开始；否则继承并覆盖"""
+    settings = _copy_settings(inherit) if inherit else GlobalSettings()
     rest = text.strip()
     while rest:
         m = re.match(r"\\tonality\{([^}]+)\}\s*", rest, re.I)
@@ -156,6 +172,13 @@ def _tonality_to_semitones(tonality: str) -> int:
     if m_sharp:
         d = int(m_sharp.group(1))
         return TONALITY_SHARP_BY_DEGREE.get(d, 0)
+    # # + 字母：#C=C#, #D=D# 等
+    m_sharp_let = re.match(r"#([A-Ga-g])\s*$", t)
+    if m_sharp_let:
+        return TONALITY_SHARP_LETTER.get(m_sharp_let.group(1).upper(), 0)
+    # 纯字母：C, D, E, F, G, A, B
+    if len(t) == 1 and t.upper() in "CDEFGAB":
+        return TONALITY_LETTER_OFFSET.get(t.upper(), 0)
     return 0
 
 
@@ -757,12 +780,25 @@ def _split_sections(text: str) -> list[list[str]]:
     chunk = text[start:].strip()
     if chunk:
         blocks.append(chunk)
-    sections = []
-    for block in blocks:
+    # 合并：若某块仅为全局设定（无 | 小节线），与下一块合并，使 \tonality 等与后续小节同属一篇章
+    merged_blocks: list[str] = []
+    i = 0
+    while i < len(blocks):
+        block = blocks[i]
+        while i + 1 < len(blocks) and "|" not in block and block.strip().startswith("\\"):
+            block = block + "\n\n" + blocks[i + 1]
+            i += 1
+        merged_blocks.append(block)
+        i += 1
+    sections: list[tuple[str, list[str]]] = []
+    for block in merged_blocks:
         lines = block.split("\n")
         part_lines = _merge_part_lines(lines)
+        # 单声部无 & 时，将含 | 的整块视为一个声部
+        if not part_lines and "|" in block:
+            part_lines = [block]
         if part_lines:
-            sections.append(part_lines)
+            sections.append((block, part_lines))
     return sections
 
 
@@ -783,63 +819,81 @@ def _split_parts(text: str) -> list[list[str]]:
     return all_blocks
 
 
+def _settings_to_duration(settings: GlobalSettings) -> tuple[float, float]:
+    """从 GlobalSettings 得到 base_duration 和 beats_per_bar"""
+    if settings.no_bar_check:
+        return 0.25, 4.0
+    beat_unit = 1.0 / settings.beat_denominator
+    return beat_unit, float(settings.beat_numerator)
+
+
 def parse(text: str) -> ParsedScore:
     settings, rest = _parse_global(text)
     _check_brackets_raise(text)
-    beat_unit = 1.0 / settings.beat_denominator
-    base_duration = beat_unit
-    beats_per_bar = float(settings.beat_numerator)
-    if settings.no_bar_check:
-        base_duration = 0.25
-        beats_per_bar = 4.0
-    tonality_offset = _tonality_to_semitones(settings.tonality)
     sections_raw = _split_sections(rest)
     if not sections_raw and rest.strip():
+        base_duration, beats_per_bar = _settings_to_duration(settings)
+        tonality_offset = _tonality_to_semitones(settings.tonality)
         part, _ = _parse_part_line(rest, base_duration, beats_per_bar, settings.no_bar_check, tonality_offset)
         if part.bars:
-            return ParsedScore(settings=settings, parts=[part], sections=[[part]])
-        return ParsedScore(settings=settings, parts=[], sections=[])
-
-    # 先合并再解析：|8| 可跨篇章重复
-    n_parts = max(len(block) for block in sections_raw)
-    merged_lines: list[str] = []
-    for part_idx in range(n_parts):
-        parts_content = []
-        for block in sections_raw:
-            if part_idx < len(block):
-                line = block[part_idx]
-                if line.strip().startswith("&"):
-                    line = line.strip()[1:].lstrip()
-                parts_content.append(line)
-        merged_lines.append("\n\n".join(parts_content))
+            return ParsedScore(
+                settings=settings,
+                parts=[part],
+                sections=[[part]],
+                section_settings=[settings],
+            )
+        return ParsedScore(settings=settings, parts=[], sections=[], section_settings=[])
 
     sections: list[list[Part]] = []
-    all_parts: list[Part] = []
-    section_starts_per_part: list[list[int]] = []
+    section_settings_list: list[GlobalSettings] = []
+    inherit = settings
 
-    for line in merged_lines:
-        part, section_starts = _parse_part_line(
-            line, base_duration, beats_per_bar, settings.no_bar_check, tonality_offset
-        )
-        if not part.bars:
+    for block_str, _ in sections_raw:
+        sec_settings, content = _parse_global(block_str, inherit)
+        inherit = sec_settings
+        base_duration, beats_per_bar = _settings_to_duration(sec_settings)
+        tonality_offset = _tonality_to_semitones(sec_settings.tonality)
+
+        # 从 content（已剥离 \tonality 等）提取 part_lines
+        lines = content.split("\n")
+        part_lines = _merge_part_lines(lines)
+        if not part_lines and "|" in content:
+            part_lines = [content]
+
+        if not part_lines:
             continue
-        all_parts.append(part)
-        section_starts_per_part.append(section_starts)
 
-    if not section_starts_per_part:
-        return ParsedScore(settings=settings, parts=[], sections=[])
+        sec_parts: list[Part] = []
+        for line in part_lines:
+            if line.strip().startswith("&"):
+                line = line.strip()[1:].lstrip()
+            part, _ = _parse_part_line(
+                line, base_duration, beats_per_bar, sec_settings.no_bar_check, tonality_offset
+            )
+            if part.bars:
+                sec_parts.append(part)
 
-    # 按 section_starts 将 bars 拆回篇章
-    n_sections = max(len(ss) for ss in section_starts_per_part)
-    for sec_idx in range(n_sections):
-        section_parts = []
-        for part_idx, (part, ss) in enumerate(zip(all_parts, section_starts_per_part)):
-            start = ss[sec_idx] if sec_idx < len(ss) else len(part.bars)
-            end = ss[sec_idx + 1] if sec_idx + 1 < len(ss) else len(part.bars)
-            if start < end:
-                sub_part = Part(bars=part.bars[start:end])
-                section_parts.append(sub_part)
-        if section_parts:
-            sections.append(section_parts)
+        if sec_parts:
+            sections.append(sec_parts)
+            section_settings_list.append(sec_settings)
 
-    return ParsedScore(settings=settings, parts=all_parts, sections=sections)
+    if not sections:
+        return ParsedScore(settings=settings, parts=[], sections=[], section_settings=[])
+
+    # 扁平化 parts：多篇章时按篇章顺序拼接
+    flat_parts: list[Part] = []
+    n_parts = max(len(sec) for sec in sections)
+    for part_idx in range(n_parts):
+        combined = Part(bars=[])
+        for sec in sections:
+            if part_idx < len(sec):
+                combined.bars.extend(sec[part_idx].bars)
+        if combined.bars:
+            flat_parts.append(combined)
+
+    return ParsedScore(
+        settings=settings,
+        parts=flat_parts,
+        sections=sections,
+        section_settings=section_settings_list,
+    )
