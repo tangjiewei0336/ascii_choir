@@ -12,6 +12,7 @@ import threading
 
 from parser import parse
 from player import Player
+from preprocessor import expand_imports
 from validator import validate
 
 
@@ -177,6 +178,36 @@ BRACKET_COLORS_DARK = ["#1e3d2e", "#1e2e3d", "#3d3d1e", "#3d1e3d", "#1e3d3d", "#
 APP_ROOT = Path(__file__).resolve().parent
 WORKSPACES_DIR = APP_ROOT / "workspaces"
 EXAMPLE_WORKSPACE = WORKSPACES_DIR / "示例"
+
+# 记住上次工作区的配置路径
+def _config_dir() -> Path:
+    if sys.platform == "win32":
+        return Path.home() / "AppData" / "Roaming" / "ASCII Choir"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "ASCII Choir"
+    return Path.home() / ".config" / "ascii_choir"
+
+
+def _load_last_workspace() -> Path | None:
+    """读取上次打开的工作区路径"""
+    cfg = _config_dir() / "last_workspace.txt"
+    if not cfg.exists():
+        return None
+    try:
+        path = Path(cfg.read_text(encoding="utf-8").strip())
+        return path if path.is_dir() else None
+    except Exception:
+        return None
+
+
+def _save_last_workspace(path: Path) -> None:
+    """保存工作区路径供下次启动使用"""
+    cfg = _config_dir() / "last_workspace.txt"
+    try:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(str(path.resolve()), encoding="utf-8")
+    except Exception:
+        pass
 
 # 示例工作区文件内容
 EXAMPLE_FILES = {
@@ -348,6 +379,7 @@ class App:
         name = path.name if path else ""
         self._workspace_frame.config(text=f"工作区: {name}")
         self._refresh_workspace_list()
+        _save_last_workspace(path)
     
     def _refresh_workspace_list(self):
         """刷新左侧工作区文件列表"""
@@ -356,6 +388,13 @@ class App:
         for f in files:
             self._workspace_list.insert(tk.END, f.name)
     
+    def _on_workspace_drag_start(self, event=None):
+        """记录拖拽源文件，供输入框 ButtonRelease 插入 \\import{文件名}"""
+        idx = self._workspace_list.nearest(event.y)
+        files = self._get_workspace_files()
+        if 0 <= idx < len(files):
+            self._drag_file = files[idx].name
+
     def _on_workspace_file_select(self, event=None):
         sel = self._workspace_list.curselection()
         if not sel or not self.workspace_root:
@@ -507,25 +546,31 @@ class App:
         )
         self._workspace_list.pack(fill=tk.BOTH, expand=True, pady=(0, 2))
         self._workspace_list.bind("<Double-Button-1>", self._on_workspace_file_select)
+        self._workspace_list.bind("<ButtonPress-1>", self._on_workspace_drag_start)
         self._workspace_list.bind("<Motion>", self._on_workspace_motion)
         self._workspace_list.bind("<Leave>", self._on_workspace_leave)
         self._workspace_list.bind("<Button-3>", self._on_workspace_context_menu)
         self._workspace_list.bind("<Button-2>", self._on_workspace_context_menu)  # macOS 右键
+        self._drag_file: str | None = None  # 拖拽到输入框时插入 \import{文件名}
         self._workspace_hover_index: int = -1
         self._apply_workspace_list_theme()
         ws_scroll = ttk.Scrollbar(self._workspace_frame, orient=tk.VERTICAL, command=self._workspace_list.yview)
         self._workspace_list.configure(yscrollcommand=ws_scroll.set)
         ws_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # 预设示例工作区
+        # 工作区：优先使用上次打开的，否则示例工作区
         _ensure_example_workspace()
-        self._set_workspace(EXAMPLE_WORKSPACE)
+        last = _load_last_workspace()
+        initial_workspace = last if last else EXAMPLE_WORKSPACE
+        self._set_workspace(initial_workspace)
         # 默认选中并加载第一个文件
-        self._workspace_list.selection_set(0)
-        first_file = EXAMPLE_WORKSPACE / "单声部.choir"
-        if first_file.exists():
-            self.current_file_path = first_file
-            self.root.title(f"简谱演奏 - {first_file.name}")
+        files = self._get_workspace_files()
+        if files:
+            self._workspace_list.selection_set(0)
+            first_file = files[0]
+            if first_file.exists():
+                self.current_file_path = first_file
+                self.root.title(f"简谱演奏 - {first_file.name}")
         
         # 右侧主内容区
         main = ttk.Frame(main_container)
@@ -584,17 +629,20 @@ class App:
         self.text.configure(xscrollcommand=hscroll.set)
         self.text.pack(fill=tk.BOTH, expand=True, pady=5)
         hscroll.pack(fill=tk.X)
-        # 默认加载示例工作区第一个文件
-        first_file = EXAMPLE_WORKSPACE / "单声部.choir"
-        if first_file.exists():
-            self.text.insert(tk.END, first_file.read_text(encoding="utf-8"))
-            self.current_file_path = first_file
+        # 默认加载工作区第一个文件（已由上方 _set_workspace 设置 current_file_path）
+        if self.current_file_path and self.current_file_path.exists():
+            self.text.insert(tk.END, self.current_file_path.read_text(encoding="utf-8"))
         else:
-            self.text.insert(tk.END, SAMPLE_SCORE)
+            fallback = EXAMPLE_WORKSPACE / "单声部.choir"
+            if fallback.exists():
+                self.text.insert(tk.END, fallback.read_text(encoding="utf-8"))
+                self.current_file_path = fallback
+            else:
+                self.text.insert(tk.END, SAMPLE_SCORE)
         self.text.bind("<Control-f>", self._on_align)
         self.root.after(100, self._do_highlights)
         self.text.bind("<KeyRelease>", self._on_key_release)
-        self.text.bind("<ButtonRelease-1>", self._on_cursor_move)
+        self.text.bind("<ButtonRelease-1>", self._on_text_button_release)
 
         # 可折叠的错误/警告面板
         self._diag_expanded = False
@@ -635,7 +683,7 @@ class App:
         hint_bg = "#2d2d2d" if self._dark_mode else "#f0f0f0"
         self.hint = tk.Label(
             main,
-            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线(可跨小节), # b ^ 升降还原, [xxx](...) 记号, [dc][fine] 反复, \\tts{文本}{zh/ja/en} 篇章间语音 | Ctrl+F 对齐 | 括号高亮",
+            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线(可跨小节), # b ^ 升降还原, [xxx](...) 记号, [dc][fine] 反复, \\tts{文本}{zh/ja/en} 篇章间语音, \\import{文件名} 导入 | 从工作区拖放插入 | Ctrl+F 对齐 | 括号高亮",
             font=("", 9),
             fg=colors["hint_fg"],
             bg=hint_bg,
@@ -894,6 +942,17 @@ class App:
         arrow = "▼" if self._diag_expanded else "▶"
         self._diag_toggle_btn.config(text=f"{arrow} 错误与警告 ({count})")
 
+    def _on_text_button_release(self, event=None):
+        """处理从工作区拖放：在落点插入 \\import{文件名}"""
+        if event and getattr(self, "_drag_file", None):
+            try:
+                idx = self.text.index(f"@{event.x},{event.y}")
+                self.text.insert(idx, f"\\import{{{self._drag_file}}}")
+                self._drag_file = None
+            except tk.TclError:
+                pass
+        self._on_cursor_move(event)
+
     def _on_cursor_move(self, event=None):
         self._update_status_bar()
 
@@ -995,7 +1054,17 @@ class App:
         if not score.strip():
             messagebox.showwarning("提示", "请输入简谱内容")
             return
-        
+        base_dir = (
+            self.workspace_root
+            if self.workspace_root and self.workspace_root.is_dir()
+            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+        )
+        try:
+            score = expand_imports(score, base_dir)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            messagebox.showerror("导入错误", str(e))
+            return
+
         self.is_playing = True
         self.btn_play.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
