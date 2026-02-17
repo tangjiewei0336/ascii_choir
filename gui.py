@@ -132,6 +132,7 @@ class App:
         
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="文件", menu=file_menu)
+        file_menu.add_command(label="新建", command=self._on_new, accelerator="Ctrl+N")
         file_menu.add_command(label="打开...", command=self._on_open, accelerator="Ctrl+O")
         file_menu.add_command(label="保存", command=self._on_save, accelerator="Ctrl+S")
         file_menu.add_command(label="另存为...", command=self._on_save_as)
@@ -146,9 +147,20 @@ class App:
         edit_menu.add_command(label="格式化", command=self._on_format, accelerator="Ctrl+F")
         edit_menu.add_command(label="复制到剪贴板", command=self._on_copy, accelerator="Ctrl+Shift+C")
         
+        self.root.bind("<Control-n>", lambda e: self._on_new())
         self.root.bind("<Control-o>", lambda e: self._on_open())
         self.root.bind("<Control-s>", lambda e: self._on_save())
         self.root.bind("<Control-Shift-C>", lambda e: self._on_copy())
+    
+    def _on_new(self):
+        """新建文件：清空编辑器，取消当前文件关联"""
+        if self._auto_save_timer:
+            self.root.after_cancel(self._auto_save_timer)
+            self._auto_save_timer = None
+        self.text.delete(1.0, tk.END)
+        self.current_file_path = None
+        self.root.title("简谱演奏 - 未命名")
+        self._do_highlights()
     
     def _on_open(self):
         path = filedialog.askopenfilename(
@@ -736,7 +748,7 @@ class App:
             try:
                 self.player.play_score(score)
             except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror("播放错误", str(e)))
+                self.root.after(0, lambda err=e: messagebox.showerror("播放错误", str(err)))
             finally:
                 self.root.after(0, self._on_play_finished)
         
