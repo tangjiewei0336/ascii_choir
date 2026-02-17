@@ -1,3 +1,8 @@
 numpy>=1.20.0
 sounddevice>=0.4.6
 soundfile>=0.12.0
+edge-tts>=6.1.0
+# TTS 音频解码：audioread（macOS 无需 ffmpeg）或 pydub（需 ffmpeg）
+audioread>=3.0.0
+pydub>=0.25.0
+audioop-lts

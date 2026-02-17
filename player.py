@@ -1,5 +1,5 @@
 """
-音频播放器：加载 WAV 并按时序混音播放
+音频播放器：加载 WAV 并按时序混音播放，支持 TTS
 """
 import numpy as np
 import soundfile as sf
@@ -8,8 +8,14 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from sound_loader import load_sound_library, get_default_sound_path
-from scheduler import ScheduledNote, schedule
+from scheduler import ScheduledNote, schedule, schedule_segments, ScheduledSegment
 from validator import parse
+
+try:
+    from tts_helper import generate_tts_audio
+except ImportError:
+    def generate_tts_audio(*args, **kwargs):
+        return None
 
 
 class Player:
@@ -91,21 +97,55 @@ class Player:
     def play_score(self, score_text: str) -> float:
         """
         解析并播放简谱，返回总时长(秒)。
+        支持篇章间 TTS（\\tts{text}{lang}）。
         阻塞直到播放完成或 stop 被调用。
         """
         self._stop_requested = False
         parsed = parse(score_text)
-        notes = schedule(parsed)
-        
-        if not notes:
+        segments = schedule_segments(parsed)
+
+        if not segments:
             return 0.0
-        
-        audio, total_duration = self._render_notes(notes)
-        # 转为 (n,1) 供 sounddevice 使用
+
+        audio_parts: list[np.ndarray] = []
+        total_duration = 0.0
+
+        for seg in segments:
+            # TTS（篇章前）
+            for tts in seg.tts_before:
+                if self._stop_requested:
+                    break
+                tts_result = generate_tts_audio(tts.text, tts.lang, self.sample_rate)
+                if tts_result:
+                    tts_audio, tts_dur = tts_result
+                    audio_parts.append(tts_audio)
+                    total_duration += tts_dur
+
+            if self._stop_requested:
+                break
+
+            # 音符
+            if seg.notes:
+                seg_audio, seg_dur = self._render_notes(seg.notes)
+                audio_parts.append(seg_audio)
+                total_duration += seg_dur
+
+        if not audio_parts:
+            return 0.0
+
+        audio = np.concatenate([a for a in audio_parts if len(a) > 0])
+        if len(audio) == 0:
+            return 0.0
+
+        # 归一化
+        max_val = np.abs(audio).max()
+        if max_val > 1.0:
+            audio = audio / max_val * 0.95
+
         audio_stereo = np.column_stack([audio, audio])
-        
+
         sd.play(audio_stereo, self.sample_rate)
-        
+
         step_ms = 50
         elapsed = 0.0
         while elapsed < total_duration and not self._stop_requested:
@@ -113,10 +153,10 @@ class Player:
             elapsed += step_ms / 1000.0
             if self._on_progress:
                 self._on_progress(min(elapsed, total_duration), total_duration)
-        
+
         if self._stop_requested:
             sd.stop()
-        
+
         return total_duration
     
     def stop(self):

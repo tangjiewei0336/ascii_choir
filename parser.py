@@ -86,11 +86,19 @@ class Part:
 
 
 @dataclass
+class TTSEvent:
+    """TTS 事件：仅可插入在篇章之间"""
+    text: str
+    lang: str  # zh, ja, en
+
+
+@dataclass
 class ParsedScore:
     settings: GlobalSettings
     parts: list[Part] = field(default_factory=list)  # 兼容：扁平化所有篇章
     sections: list[list[Part]] = field(default_factory=list)  # 篇章列表，每篇章 & 数量相同
     section_settings: list[GlobalSettings] = field(default_factory=list)  # 每篇章的独立设定（覆盖前面的）
+    section_tts: list[list[TTSEvent]] = field(default_factory=list)  # 每篇章前的 TTS，section_tts[i] 在 section i 之前播放
 
 
 def _copy_settings(s: GlobalSettings) -> GlobalSettings:
@@ -856,11 +864,12 @@ def _split_sections(text: str) -> list[list[str]]:
     if chunk:
         blocks.append(chunk)
     # 合并：若某块仅为全局设定（无 | 小节线），与下一块合并，使 \tonality 等与后续小节同属一篇章
+    # \tts 仅可插入篇章之间，不参与合并
     merged_blocks: list[str] = []
     i = 0
     while i < len(blocks):
         block = blocks[i]
-        while i + 1 < len(blocks) and "|" not in block and block.strip().startswith("\\"):
+        while i + 1 < len(blocks) and "|" not in block and block.strip().startswith("\\") and "\\tts" not in block.lower():
             block = block + "\n\n" + blocks[i + 1]
             i += 1
         merged_blocks.append(block)
@@ -872,9 +881,26 @@ def _split_sections(text: str) -> list[list[str]]:
         # 单声部无 & 时，将含 | 的整块视为一个声部
         if not part_lines and "|" in block:
             part_lines = [block]
-        if part_lines:
-            sections.append((block, part_lines))
+        # 包含所有块（含仅 \tts 的块，part_lines 为空）
+        sections.append((block, part_lines))
     return sections
+
+def _extract_tts(block: str) -> list[TTSEvent]:
+    """从块中提取 \\tts{text} 或 \\tts{text}{lang}，lang 支持 zh/ja/en"""
+    result: list[TTSEvent] = []
+    rest = block
+    while rest:
+        m = re.search(r"\\tts\{([^{}]*)\}(?:\{([^{}]+)\})?\s*", rest, re.I)
+        if not m:
+            break
+        text = m.group(1).strip()
+        raw = (m.group(2) or "en").strip().lower()[:2]
+        lang = "zh-CN" if raw == "zh" else "ja-JP" if raw == "ja" else "en-US"
+        if text:
+            result.append(TTSEvent(text=text, lang=lang))
+        rest = rest[m.end():]
+    return result
+
 
 def _settings_to_duration(settings: GlobalSettings) -> tuple[float, float]:
     """从 GlobalSettings 得到 base_duration 和 beats_per_bar"""
@@ -903,9 +929,21 @@ def parse(text: str) -> ParsedScore:
 
     sections: list[list[Part]] = []
     section_settings_list: list[GlobalSettings] = []
+    section_tts_list: list[list[TTSEvent]] = []
+    pending_tts: list[TTSEvent] = []
     inherit = settings
 
     for block_str, _ in sections_raw:
+        # TTS 仅可插入篇章之间：若块仅含 \tts（无小节线、无 & 旋律），提取并等待下一篇章
+        tts_events = _extract_tts(block_str)
+        part_lines_check = _merge_part_lines(block_str.split("\n"))
+        if tts_events and "|" not in block_str and not part_lines_check:
+            pending_tts.extend(tts_events)
+            # 仍解析全局设定以更新 inherit（如 \tonality 等）
+            sec_settings, _ = _parse_global(block_str, inherit)
+            inherit = sec_settings
+            continue
+
         sec_settings, content = _parse_global(block_str, inherit)
         inherit = sec_settings
         base_duration, beats_per_bar = _settings_to_duration(sec_settings)
@@ -919,6 +957,10 @@ def parse(text: str) -> ParsedScore:
 
         if not part_lines:
             continue
+
+        # 本篇章前的 TTS：前序块中的 + 本块中的 \tts（同块内 \tts 在旋律前）
+        section_tts_list.append(pending_tts + tts_events)
+        pending_tts = []
 
         # 上一篇章各声部的 bars，供 |8| 跨篇章重复
         prev_bars_per_part: list[list[BarContent]] = []
@@ -944,6 +986,10 @@ def parse(text: str) -> ParsedScore:
     if not sections:
         return ParsedScore(settings=settings, parts=[], sections=[], section_settings=[])
 
+    # 末尾的 TTS（最后一篇章之后）
+    if pending_tts:
+        section_tts_list.append(pending_tts)
+
     # 扁平化 parts：多篇章时按篇章顺序拼接
     flat_parts: list[Part] = []
     n_parts = max(len(sec) for sec in sections)
@@ -960,4 +1006,5 @@ def parse(text: str) -> ParsedScore:
         parts=flat_parts,
         sections=sections,
         section_settings=section_settings_list,
+        section_tts=section_tts_list,
     )
