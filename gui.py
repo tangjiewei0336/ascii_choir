@@ -886,6 +886,8 @@ class App:
         self.btn_duration_multiply.pack(side=tk.LEFT, padx=(0, 5))
 
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+
+        ttk.Button(toolbar, text="VOICEVOX 音色", command=self._on_voicevox_voices).pack(side=tk.LEFT, padx=(0, 5))
         
         ttk.Button(toolbar, text="打开示例工作区", command=self._on_open_example_workspace).pack(side=tk.LEFT, padx=(0, 5))
         

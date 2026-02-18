@@ -456,13 +456,23 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         self.clipboard_append(cmd)
         self._status.config(text=f"已复制: {cmd}")
 
+    def _no_lyrics_message(self) -> str:
+        """找不到 lyrics 时的提示文案"""
+        current = self.get_current_file_callback() if self.get_current_file_callback else None
+        file_hint = f"当前文件「{current.name}」" if current else "当前内容"
+        return (
+            f"{file_hint}中没有带 \\lyrics 的简谱。\n\n"
+            "• 可在左侧工作区双击切换其他文件（如 VOCALOID.choir、自动和声.choir）\n"
+            "• 或在当前文件中添加 \\lyrics{字/字}{0}{音色id}{0}"
+        )
+
     def _on_acappella(self) -> None:
         """清唱生成：用当前选中音色合成简谱歌声（无伴奏），直接播放"""
         if not self.get_score_callback:
             return
         score_text = self.get_score_callback()
         if not score_text or not score_text.strip():
-            messagebox.showwarning("清唱生成", "请先在编辑器中输入带 \\lyrics 的简谱")
+            messagebox.showwarning("清唱生成", self._no_lyrics_message())
             return
         sel = self.tree.selection()
         voice_id = None
@@ -480,7 +490,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                     score_text, sample_rate=44100, voice_id_override=voice_id, base_url=self.base_url
                 )
                 if not result:
-                    self.after(0, lambda: self._acappella_done("无带歌词的篇章或合成失败", None))
+                    self.after(0, lambda: self._acappella_done(self._no_lyrics_message(), None))
                     return
                 audio, _ = result
                 buf = io.BytesIO()
