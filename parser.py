@@ -219,6 +219,39 @@ def _simplified_to_midi(
     return base + octave_offset * 12 + tonality_offset
 
 
+def parse_note_part_to_midi(part: str, octave: int = 4, tonality_offset: int = 0) -> Optional[int]:
+    """将单个音符部分（如 1、.6、6.、#1）解析为 MIDI 音高。用于和弦排序等。"""
+    part = part.strip().lstrip("~")
+    if not part or part.startswith("0"):
+        return None
+    acc = 0
+    if part.startswith("#"):
+        acc = 1
+        part = part[1:]
+    elif part.startswith("b") and len(part) > 1 and part[1].isdigit():
+        acc = -1
+        part = part[1:]
+    elif part.startswith("^"):
+        acc = 2
+        part = part[1:]
+    left_dots = 0
+    while part.startswith("."):
+        left_dots += 1
+        part = part[1:]
+    part = re.sub(r"[-_]+$", "", part)
+    right_dots = 0
+    while part.endswith("."):
+        right_dots += 1
+        part = part[:-1]
+    if not part or not part[0].isdigit():
+        return None
+    num = int(part[0])
+    if num < 1 or num > 7:
+        return None
+    oct_final = octave - left_dots + right_dots
+    return _simplified_to_midi(num, oct_final, acc, tonality_offset)
+
+
 def _has_accidental(tok: str) -> bool:
     """检查 token 是否含升降号 # b ^"""
     t = tok.strip()
@@ -999,7 +1032,13 @@ def _settings_to_duration(settings: GlobalSettings) -> tuple[float, float]:
     return beat_unit, float(settings.beat_numerator)
 
 
+def _strip_comments(text: str) -> str:
+    """移除 // 单行注释（同 Java），解析时忽略注释内容"""
+    return re.sub(r"//[^\n]*", "", text)
+
+
 def parse(text: str) -> ParsedScore:
+    text = _strip_comments(text)
     settings, rest = _parse_global(text)
     _check_brackets_raise(text)
     sections_raw = _split_sections(rest)

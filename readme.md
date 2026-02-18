@@ -228,7 +228,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 - `\lyrics{...}{part_index}`：**声部索引**，指定歌词追加到第几个声部（0 起）。多声部时，0=第一行旋律，1=第二行旋律，以此类推
 - `\lyrics{...}{part_index}{voice_id}`：voice_id 为 VOICEVOX style_id（可选）。**有 voice_id 时播放会用 VOICEVOX 歌唱合成歌声**，替代 WAV 音色
 - `\lyrics{...}{part_index}{voice_id}{melody}`：**melody** 为和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
-- 行内歌词：`1(啊) 2(一)` 在音符后加括号
+- 行内歌词：`1(啊) 2(一)` 在音符后加括号（未测试！！）
 
 ```text
 \tonality{1}
@@ -238,12 +238,27 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 |1 2 3 4|5 6 7 1|
 ```
 
-多声部示例：
+多声部示例（`\lyrics{音节}{part_index}{voice_id}{melody}` 四个参数依次为）：
+- **音节**：斜杠分隔的字，与音符一一对齐
+- **part_index**：声部索引（0 起），0=第一行旋律，1=第二行旋律
+- **voice_id**：VOICEVOX 的 style_id，有则用歌唱合成；可省略
+- **melody**：和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
+
 ```text
-\lyrics{啊/呀/哦}{0}
-\lyrics{啦/啦/啦}{1}
+\tonality{1}
+\beat{4/4}
+\lyrics{啊/呀/哦}{0}{5}{0}  // 音节/声部0/音色5/第一音旋律
 & 1 2 3 | 4 5 6
-& 7 8 9 | 1 2 3
+```
+
+和弦 melody 示例（同一声部有和弦时，`0` 取每和弦第一音、`1` 取第二音）：但目前只能启用一个
+```text
+\tonality{1}
+\beat{4/4}
+\bpm{60}
+\lyrics{低/低/音/音/唱/唱}{0}{5}{0}   // melody=0：取 1/3、2/4、3/5、4/6、5/7、6/1. 中的 1、2、3、4、5、6
+\lyrics{高/高/音/音/唱/唱}{0}{5}{1}   // melody=1：取各和弦第二音 3、4、5、6、7、1.
+& |1/3 2/4 3/5|4/6 5/7 6/1.|
 ```
 
 ### 导入文件（\import）

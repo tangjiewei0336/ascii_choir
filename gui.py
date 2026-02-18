@@ -10,6 +10,15 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 from pathlib import Path
 import threading
 
+from chord_utils import (
+    chord_sort,
+    chord_swap_two,
+    duration_divide_two,
+    duration_multiply_two,
+    find_note_tokens_in_range,
+    get_chords_to_operate,
+    get_tonality_offset,
+)
 from parser import parse
 from player import Player
 from preprocessor import expand_imports
@@ -289,8 +298,13 @@ class App:
         
         edit_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="编辑", menu=edit_menu)
+        edit_menu.add_command(label="剪切", command=self._on_cut, accelerator="Ctrl+X")
+        edit_menu.add_command(label="复制", command=self._on_copy_selection, accelerator="Ctrl+C")
+        edit_menu.add_command(label="粘贴", command=self._on_paste, accelerator="Ctrl+V")
+        edit_menu.add_command(label="全选", command=self._on_select_all, accelerator="Ctrl+A")
+        edit_menu.add_separator()
         edit_menu.add_command(label="格式化", command=self._on_format, accelerator="Ctrl+F")
-        edit_menu.add_command(label="复制到剪贴板", command=self._on_copy, accelerator="Ctrl+Shift+C")
+        edit_menu.add_command(label="复制全部到剪贴板", command=self._on_copy_all, accelerator="Ctrl+Shift+C")
 
         tts_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="TTS", menu=tts_menu)
@@ -299,7 +313,7 @@ class App:
         self.root.bind("<Control-n>", lambda e: self._on_new())
         self.root.bind("<Control-o>", lambda e: self._on_open())
         self.root.bind("<Control-s>", lambda e: self._on_save())
-        self.root.bind("<Control-Shift-C>", lambda e: self._on_copy())
+        self.root.bind("<Control-Shift-C>", lambda e: self._on_copy_all())
     
     def _on_new(self):
         """新建文件：先询问名称，然后直接保存"""
@@ -410,13 +424,175 @@ class App:
         """格式化：对齐小节号"""
         self._on_align()
     
-    def _on_copy(self):
+    def _on_cut(self):
+        """剪切选中内容到剪贴板"""
+        try:
+            sel = self.text.get(tk.SEL_FIRST, tk.SEL_LAST)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(sel)
+            self.root.update()
+            self.text.delete(tk.SEL_FIRST, tk.SEL_LAST)
+            self._schedule_auto_save()
+            self._schedule_preview()
+        except tk.TclError:
+            pass  # 无选中内容
+
+    def _on_copy_selection(self):
+        """复制选中内容到剪贴板"""
+        try:
+            sel = self.text.get(tk.SEL_FIRST, tk.SEL_LAST)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(sel)
+            self.root.update()
+            self.status_label.config(text="已复制")
+            self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+        except tk.TclError:
+            pass  # 无选中内容
+
+    def _on_paste(self):
+        """从剪贴板粘贴到光标位置"""
+        try:
+            content = self.root.clipboard_get()
+            self.text.insert(tk.INSERT, content)
+            self._schedule_auto_save()
+            self._schedule_preview()
+        except tk.TclError:
+            pass  # 剪贴板为空或不可用
+
+    def _on_select_all(self):
+        """全选编辑器内容"""
+        self.text.tag_add(tk.SEL, "1.0", tk.END)
+        self.text.mark_set(tk.INSERT, "1.0")
+        self.text.see(tk.INSERT)
+
+    def _on_text_context_menu(self, event):
+        """编辑器右键菜单：剪切、复制、粘贴、全选；若光标在和弦上则显示和弦操作"""
+        self.text.focus_set()
+        idx = self.text.index(f"@{event.x},{event.y}")
+        content = self.text.get(1.0, tk.END)
+        cursor_pos = len(self.text.get(1.0, idx))
+        try:
+            sel_first = self.text.index(tk.SEL_FIRST)
+            sel_last = self.text.index(tk.SEL_LAST)
+            sel_start = len(self.text.get(1.0, sel_first))
+            sel_end = len(self.text.get(1.0, sel_last))
+            if sel_start == sel_end:
+                sel_start = sel_end = None
+        except tk.TclError:
+            sel_start = sel_end = None
+        chords = get_chords_to_operate(content, sel_start, sel_end, cursor_pos)
+        has_two_note = any(len(c[2].rstrip("_").split("/")) == 2 for c in chords)
+
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="剪切", command=self._on_cut)
+        menu.add_command(label="复制", command=self._on_copy_selection)
+        menu.add_command(label="粘贴", command=self._on_paste)
+        menu.add_separator()
+        menu.add_command(label="全选", command=self._on_select_all)
+        if chords:
+            menu.add_separator()
+            swap_state = tk.NORMAL if has_two_note else tk.DISABLED
+            menu.add_command(label="和弦：交换两音", command=self._on_chord_swap, state=swap_state)
+            menu.add_command(label="和弦：按音高升序", command=self._on_chord_sort_asc)
+            menu.add_command(label="和弦：按音高降序", command=self._on_chord_sort_desc)
+        menu.add_separator()
+        dur_state = tk.NORMAL if (sel_start is not None and sel_end is not None) else tk.DISABLED
+        menu.add_command(label="时值÷2", command=self._on_duration_divide_two, state=dur_state)
+        menu.add_command(label="时值×2", command=self._on_duration_multiply_two, state=dur_state)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _on_copy_all(self):
+        """复制全部内容到剪贴板"""
         content = self.text.get(1.0, tk.END)
         self.root.clipboard_clear()
         self.root.clipboard_append(content)
         self.root.update()
-        self.status_label.config(text="已复制到剪贴板")
+        self.status_label.config(text="已复制全部到剪贴板")
         self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+
+    def _get_selection_and_cursor(self) -> tuple[int | None, int | None, int | None]:
+        """返回 (sel_start, sel_end, cursor_pos) 字符位置，0-based"""
+        content = self.text.get(1.0, tk.END)
+        try:
+            sel_first = self.text.index(tk.SEL_FIRST)
+            sel_last = self.text.index(tk.SEL_LAST)
+            sel_start = len(self.text.get(1.0, sel_first))
+            sel_end = len(self.text.get(1.0, sel_last))
+            if sel_start == sel_end:
+                sel_start = sel_end = None
+        except tk.TclError:
+            sel_start = sel_end = None
+        try:
+            insert_idx = self.text.index(tk.INSERT)
+            cursor_pos = len(self.text.get(1.0, insert_idx))
+        except tk.TclError:
+            cursor_pos = None
+        return sel_start, sel_end, cursor_pos
+
+    def _apply_chord_operation(self, transform):
+        """对选区/光标处的和弦应用变换。transform(chord_text, tonality_offset) -> new_text"""
+        content = self.text.get(1.0, tk.END)
+        sel_start, sel_end, cursor_pos = self._get_selection_and_cursor()
+        chords = get_chords_to_operate(content, sel_start, sel_end, cursor_pos)
+        if not chords:
+            return
+        tonality = get_tonality_offset(content)
+        # 从后往前替换，避免位置偏移
+        for start, end, chord_text in reversed(chords):
+            new_text = transform(chord_text, tonality)
+            if new_text is not None and new_text != chord_text:
+                self.text.delete(f"1.0+{start}c", f"1.0+{end}c")
+                self.text.insert(f"1.0+{start}c", new_text)
+        self._schedule_auto_save()
+        self._schedule_preview()
+        self._do_highlights()
+
+    def _on_chord_swap(self):
+        """交换和弦中两音顺序（仅两音和弦）"""
+        def transform(ct, _):
+            return chord_swap_two(ct)
+        self._apply_chord_operation(transform)
+
+    def _on_chord_sort_asc(self):
+        """按音高升序排列和弦内各音"""
+        def transform(ct, to):
+            return chord_sort(ct, ascending=True, tonality_offset=to)
+        self._apply_chord_operation(transform)
+
+    def _on_chord_sort_desc(self):
+        """按音高降序排列和弦内各音"""
+        def transform(ct, to):
+            return chord_sort(ct, ascending=False, tonality_offset=to)
+        self._apply_chord_operation(transform)
+
+    def _apply_duration_operation(self, transform):
+        """对选区内的音符应用时值变换。无选区则不操作。transform(token) -> new_token or None"""
+        sel_start, sel_end, _ = self._get_selection_and_cursor()
+        if sel_start is None or sel_end is None:
+            return
+        content = self.text.get(1.0, tk.END)
+        tokens = find_note_tokens_in_range(content, sel_start, sel_end)
+        if not tokens:
+            return
+        for start, end, tok in reversed(tokens):
+            new_tok = transform(tok)
+            if new_tok is not None and new_tok != tok:
+                self.text.delete(f"1.0+{start}c", f"1.0+{end}c")
+                self.text.insert(f"1.0+{start}c", new_tok)
+        self._schedule_auto_save()
+        self._schedule_preview()
+        self._do_highlights()
+
+    def _on_duration_divide_two(self):
+        """时值除以2：每个音符后加 _（四分→八分→十六分，最多十六分）"""
+        self._apply_duration_operation(duration_divide_two)
+
+    def _on_duration_multiply_two(self):
+        """时值乘以2：每个音符去掉一个 _（十六分→八分→四分，最多四分）"""
+        self._apply_duration_operation(duration_multiply_two)
 
     def _on_voicevox_voices(self):
         """打开 VOICEVOX 音色选择对话框（音色列表 + 利用規約 + 试听 + 清唱生成）"""
@@ -703,6 +879,13 @@ class App:
         self.btn_stop.pack(side=tk.LEFT, padx=(0, 5))
         
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+
+        self.btn_duration_divide = ttk.Button(toolbar, text="时值÷2", command=self._on_duration_divide_two, state=tk.DISABLED)
+        self.btn_duration_divide.pack(side=tk.LEFT, padx=(0, 2))
+        self.btn_duration_multiply = ttk.Button(toolbar, text="时值×2", command=self._on_duration_multiply_two, state=tk.DISABLED)
+        self.btn_duration_multiply.pack(side=tk.LEFT, padx=(0, 5))
+
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
         
         ttk.Button(toolbar, text="打开示例工作区", command=self._on_open_example_workspace).pack(side=tk.LEFT, padx=(0, 5))
         
@@ -775,10 +958,29 @@ class App:
             else:
                 self.text.insert(tk.END, SAMPLE_SCORE)
         self.text.bind("<Control-f>", self._on_align)
+        def _edit_bind(seq, handler):
+            def _handler(e):
+                handler()
+                return "break"
+            self.text.bind(seq, _handler)
+
+        _edit_bind("<Control-x>", self._on_cut)
+        _edit_bind("<Control-c>", self._on_copy_selection)
+        _edit_bind("<Control-v>", self._on_paste)
+        _edit_bind("<Control-a>", self._on_select_all)
+        _edit_bind("<Control-Shift-C>", self._on_copy_all)
+        if sys.platform == "darwin":
+            _edit_bind("<Command-x>", self._on_cut)
+            _edit_bind("<Command-c>", self._on_copy_selection)
+            _edit_bind("<Command-v>", self._on_paste)
+            _edit_bind("<Command-a>", self._on_select_all)
         self.root.after(100, self._do_highlights)
         self.root.after(150, self._update_preview)
+        self.root.after(200, self._update_duration_buttons_state)
         self.text.bind("<KeyRelease>", self._on_key_release)
         self.text.bind("<ButtonRelease-1>", self._on_text_button_release)
+        self.text.bind("<Button-3>", self._on_text_context_menu)
+        self.text.bind("<Button-2>", self._on_text_context_menu)  # macOS 右键
         # 拖拽从 Listbox 到 Text 时，释放事件会发给 Listbox（鼠标被捕获），故用全局监听
         self.root.bind_all("<ButtonRelease-1>", self._on_global_drop_check)
 
@@ -811,6 +1013,7 @@ class App:
             self.text.tag_configure(f"bracket{i}", background=c)
         self.text.tag_configure("diag_error", underline=True, underlinefg="#c55")
         self.text.tag_configure("diag_warning", underline=True, underlinefg="#c9a227")
+        self.text.tag_configure("comment", foreground="#2d5a2d" if not self._dark_mode else "#5a8a5a")
         self._bar_check_enabled = True  # \no_bar_check 时可关闭
         self._highlight_timer = None
         self._auto_save_timer = None
@@ -821,7 +1024,7 @@ class App:
         hint_bg = "#2d2d2d" if self._dark_mode else "#f0f0f0"
         self.hint = tk.Label(
             main,
-            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线(可跨小节), # b ^ 升降还原, [xxx](...) 记号, [dc][fine] 反复, \\tts{文本}{zh/ja/en}{voice_id} 篇章间语音(voice_id用VOICEVOX), \\lyrics{字/字}{part}{voice_id}{melody} 歌词(melody:0第一音1第二音), 1(啊) 行内歌词, \\import{文件名} 导入 | 文件→导出带歌词简谱(JPG) | Ctrl+F 对齐 | 括号高亮",
+            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线(可跨小节), # b ^ 升降还原, [xxx](...) 记号, [dc][fine] 反复, // 单行注释, \\tts{文本}{zh/ja/en}{voice_id} 篇章间语音(voice_id用VOICEVOX), \\lyrics{字/字}{part}{voice_id}{melody} 歌词(melody:0第一音1第二音), 1(啊) 行内歌词, \\import{文件名} 导入 | 文件→导出带歌词简谱(JPG) | Ctrl+F 对齐 | 括号高亮",
             font=("", 9),
             fg=colors["hint_fg"],
             bg=hint_bg,
@@ -1118,8 +1321,17 @@ class App:
         """处理输入框内点击/释放，更新状态栏；拖放由 _on_global_drop_check 处理"""
         self._on_cursor_move(event)
 
+    def _update_duration_buttons_state(self):
+        """无选区时灰掉时值按钮"""
+        sel_start, sel_end, _ = self._get_selection_and_cursor()
+        has_selection = sel_start is not None and sel_end is not None
+        state = tk.NORMAL if has_selection else tk.DISABLED
+        self.btn_duration_divide.config(state=state)
+        self.btn_duration_multiply.config(state=state)
+
     def _on_cursor_move(self, event=None):
         self._update_status_bar()
+        self._update_duration_buttons_state()
 
     def _update_status_bar(self, score=None):
         """更新状态栏：行列号、总拍数、小节数"""
@@ -1188,9 +1400,18 @@ class App:
             self.text.see(f"{d.line}.{d.column}")
             self.text.mark_set(tk.INSERT, f"{d.line}.{d.column}")
 
+    def _highlight_comments(self):
+        """// 单行注释显示为深绿色"""
+        self.text.tag_remove("comment", "1.0", tk.END)
+        content = self.text.get(1.0, tk.END)
+        for m in re.finditer(r"//[^\n]*", content):
+            start, end = m.span()
+            self.text.tag_add("comment", f"1.0+{start}c", f"1.0+{end}c")
+
     def _do_highlights(self):
-        """执行括号高亮、诊断波浪线（错误红/警告黄）"""
+        """执行括号高亮、注释高亮、诊断波浪线（错误红/警告黄）"""
         self._highlight_brackets()
+        self._highlight_comments()
         self._update_diagnostics()
     
     def _on_key_release(self, event=None):
@@ -1198,6 +1419,7 @@ class App:
             self.text.after_cancel(self._highlight_timer)
         self._highlight_timer = self.text.after(300, self._do_highlights)
         self.root.after(50, self._update_status_bar)
+        self._update_duration_buttons_state()
         self._schedule_auto_save()
         self._schedule_preview()
     

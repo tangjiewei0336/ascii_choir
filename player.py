@@ -18,13 +18,16 @@ except ImportError:
         return None
 
 try:
-    from lyrics_synth import synthesize_lyrics, has_lyrics_voice
+    from lyrics_synth import synthesize_lyrics, has_lyrics_voice, get_lyrics_part_index
 except ImportError:
     def synthesize_lyrics(*args, **kwargs):
         return None
 
     def has_lyrics_voice(*args, **kwargs):
         return False
+
+    def get_lyrics_part_index(*args, **kwargs):
+        return None
 
 
 class Player:
@@ -116,10 +119,13 @@ class Player:
         if not segments:
             return 0.0
 
+        # 先生成全部内容再播放，避免不同步。有歌词时合并相关篇章，避免唱完后再用 MIDI 重复演奏
         audio_parts: list[np.ndarray] = []
         total_duration = 0.0
+        seg_idx = 0
 
-        for seg in segments:
+        while seg_idx < len(segments):
+            seg = segments[seg_idx]
             # TTS（篇章前）
             for tts in seg.tts_before:
                 if self._stop_requested:
@@ -134,31 +140,56 @@ class Player:
             if self._stop_requested:
                 break
 
-            # 音符：有 \\lyrics{...}{voice_id} 时用 VOICEVOX 歌唱合成，否则用 WAV
-            if seg.notes:
-                seg_dur = max(n.start_time + n.duration for n in seg.notes)
-                if has_lyrics_voice(parsed, seg.section_index):
-                    sing_result = synthesize_lyrics(
-                        parsed, seg.section_index, self.sample_rate, max_duration_seconds=seg_dur
-                    )
-                    if sing_result:
-                        seg_audio, _ = sing_result
-                        # 若歌声短于段落，末尾补静音
-                        target_len = int(seg_dur * self.sample_rate) + 1
-                        if len(seg_audio) < target_len:
-                            seg_audio = np.pad(seg_audio, (0, target_len - len(seg_audio)), mode="constant")
-                        elif len(seg_audio) > target_len:
-                            seg_audio = seg_audio[:target_len]
-                        audio_parts.append(seg_audio)
-                        total_duration += seg_dur
-                    else:
-                        seg_audio, seg_dur = self._render_notes(seg.notes)
-                        audio_parts.append(seg_audio)
-                        total_duration += seg_dur
-                else:
-                    seg_audio, seg_dur = self._render_notes(seg.notes)
-                    audio_parts.append(seg_audio)
-                    total_duration += seg_dur
+            if not seg.notes:
+                seg_idx += 1
+                continue
+
+            lyrics_part = get_lyrics_part_index(parsed, seg.section_index) if has_lyrics_voice(parsed, seg.section_index) else None
+
+            if lyrics_part is not None:
+                # 有歌词：合并本段及后续无 TTS 的篇章，歌声 + 伴奏一次性混合，避免唱完再 MIDI 重复
+                merge_segs: list[ScheduledSegment] = [seg]
+                j = seg_idx + 1
+                while j < len(segments) and not segments[j].tts_before:
+                    merge_segs.append(segments[j])
+                    j += 1
+
+                sing_result = synthesize_lyrics(
+                    parsed, seg.section_index, self.sample_rate, max_duration_seconds=None
+                )
+                voice_audio = sing_result[0] if sing_result else np.array([], dtype=np.float32)
+
+                # 合并所有篇章的伴奏（排除歌词声部），按时间偏移拼接
+                t_offset = 0.0
+                accomp_parts: list[tuple[np.ndarray, float]] = []
+                for mseg in merge_segs:
+                    other_notes = [n for n in mseg.notes if n.part_index != lyrics_part]
+                    if other_notes:
+                        acc, acc_dur = self._render_notes(other_notes)
+                        if len(acc) > 0:
+                            accomp_parts.append((acc, t_offset))
+                    t_offset += max(n.start_time + n.duration for n in mseg.notes)
+
+                target_len = max(
+                    len(voice_audio),
+                    int(t_offset * self.sample_rate) + 1,
+                )
+                mix = np.zeros(target_len, dtype=np.float32)
+                if len(voice_audio) > 0:
+                    mix[:len(voice_audio)] += voice_audio
+                for acc_audio, offset in accomp_parts:
+                    start_samp = int(offset * self.sample_rate)
+                    end_samp = min(start_samp + len(acc_audio), target_len)
+                    mix[start_samp:end_samp] += acc_audio[: end_samp - start_samp]
+
+                audio_parts.append(mix)
+                total_duration += target_len / self.sample_rate
+                seg_idx = j
+            else:
+                seg_audio, seg_dur = self._render_notes(seg.notes)
+                audio_parts.append(seg_audio)
+                total_duration += seg_dur
+                seg_idx += 1
 
         if not audio_parts:
             return 0.0
