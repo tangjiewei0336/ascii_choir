@@ -10,10 +10,41 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 from pathlib import Path
 import threading
 
+from chord_utils import (
+    chord_sort,
+    chord_swap_two,
+    duration_divide_two,
+    duration_multiply_two,
+    find_note_tokens_in_range,
+    get_chords_to_operate,
+    get_tonality_offset,
+)
 from parser import parse
 from player import Player
 from preprocessor import expand_imports
+from renderer import render_to_image, render_to_pil
 from validator import validate
+
+
+def show_error_detail(parent: tk.Tk, title: str, message: str, traceback_str: str | None = None) -> None:
+    """展示详细错误信息，含堆栈或较长时用可滚动对话框"""
+    full = message
+    if traceback_str:
+        full = f"{message}\n\n--- 详细堆栈 ---\n{traceback_str}"
+    if not traceback_str and len(message) < 200 and message.count("\n") < 2:
+        messagebox.showerror(title, message, parent=parent)
+        return
+    dlg = tk.Toplevel(parent)
+    dlg.title(title)
+    dlg.transient(parent)
+    dlg.geometry("520x360")
+    ttk.Label(dlg, text=message.split("\n")[0][:80] + ("..." if len(message.split("\n")[0]) > 80 else ""), wraplength=480).pack(anchor=tk.W, padx=10, pady=(10, 5))
+    txt = scrolledtext.ScrolledText(dlg, wrap=tk.WORD, font=("Consolas", 10), height=14, width=60)
+    txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+    txt.insert(tk.END, full)
+    txt.config(state=tk.DISABLED)
+    ttk.Button(dlg, text="关闭", command=dlg.destroy).pack(pady=(0, 10))
+    dlg.geometry(f"+{parent.winfo_rootx() + 80}+{parent.winfo_rooty() + 120}")
 
 
 def _ask_rename(prompt: str, initial: str, parent: tk.Tk) -> str | None:
@@ -234,8 +265,8 @@ class App:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("简谱演奏 - ASCII Choir")
-        self.root.geometry("1000x600")
-        self.root.minsize(600, 400)
+        self.root.geometry("1280x720")
+        self.root.minsize(700, 500)
         
         self._dark_mode = _is_dark_mode()
         self.player = Player()
@@ -258,6 +289,7 @@ class App:
         file_menu.add_command(label="打开...", command=self._on_open, accelerator="Ctrl+O")
         file_menu.add_command(label="保存", command=self._on_save, accelerator="Ctrl+S")
         file_menu.add_command(label="另存为...", command=self._on_save_as)
+        file_menu.add_command(label="导出带歌词简谱 (JPG)...", command=self._on_export_lyrics_jpg)
         file_menu.add_separator()
         file_menu.add_command(label="打开工作区...", command=self._on_open_workspace)
         file_menu.add_command(label="打开示例工作区", command=self._on_open_example_workspace)
@@ -266,13 +298,22 @@ class App:
         
         edit_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="编辑", menu=edit_menu)
+        edit_menu.add_command(label="剪切", command=self._on_cut, accelerator="Ctrl+X")
+        edit_menu.add_command(label="复制", command=self._on_copy_selection, accelerator="Ctrl+C")
+        edit_menu.add_command(label="粘贴", command=self._on_paste, accelerator="Ctrl+V")
+        edit_menu.add_command(label="全选", command=self._on_select_all, accelerator="Ctrl+A")
+        edit_menu.add_separator()
         edit_menu.add_command(label="格式化", command=self._on_format, accelerator="Ctrl+F")
-        edit_menu.add_command(label="复制到剪贴板", command=self._on_copy, accelerator="Ctrl+Shift+C")
+        edit_menu.add_command(label="复制全部到剪贴板", command=self._on_copy_all, accelerator="Ctrl+Shift+C")
+
+        tts_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="TTS", menu=tts_menu)
+        tts_menu.add_command(label="VOICEVOX 音色选择...", command=self._on_voicevox_voices)
         
         self.root.bind("<Control-n>", lambda e: self._on_new())
         self.root.bind("<Control-o>", lambda e: self._on_open())
         self.root.bind("<Control-s>", lambda e: self._on_save())
-        self.root.bind("<Control-Shift-C>", lambda e: self._on_copy())
+        self.root.bind("<Control-Shift-C>", lambda e: self._on_copy_all())
     
     def _on_new(self):
         """新建文件：先询问名称，然后直接保存"""
@@ -303,8 +344,10 @@ class App:
         self._do_highlights()
     
     def _on_open(self):
+        initialdir = str(self.current_file_path.parent) if self.current_file_path else None
         path = filedialog.askopenfilename(
             title="打开简谱文件",
+            initialdir=initialdir,
             filetypes=[("简谱文件", "*.choir *.txt"), ("所有文件", "*.*")],
         )
         if path:
@@ -317,25 +360,250 @@ class App:
             self._on_save_as()
     
     def _on_save_as(self):
+        initialdir = str(self.current_file_path.parent) if self.current_file_path else None
+        initialfile = self.current_file_path.name if self.current_file_path else None
         path = filedialog.asksaveasfilename(
             title="另存为",
+            initialdir=initialdir,
+            initialfile=initialfile,
             defaultextension=".choir",
             filetypes=[("简谱文件", "*.choir *.txt"), ("所有文件", "*.*")],
         )
         if path:
             self._save_to(Path(path))
-    
+
+    def _on_export_lyrics_jpg(self):
+        """导出带歌词简谱为 JPG"""
+        content = self.text.get(1.0, tk.END)
+        if not content.strip():
+            messagebox.showwarning("提示", "请输入简谱内容")
+            return
+        base_dir = (
+            self.workspace_root
+            if self.workspace_root and self.workspace_root.is_dir()
+            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+        )
+        try:
+            content = expand_imports(content, base_dir)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            import traceback
+            show_error_detail(self.root, "导入错误", str(e), traceback.format_exc())
+            return
+        try:
+            score = parse(content)
+        except Exception as e:
+            import traceback
+            show_error_detail(self.root, "解析错误", str(e), traceback.format_exc())
+            return
+        initialdir = str(self.current_file_path.parent) if self.current_file_path else None
+        initialfile = (self.current_file_path.stem + ".jpg") if self.current_file_path else None
+        path = filedialog.asksaveasfilename(
+            title="导出带歌词简谱",
+            initialdir=initialdir,
+            initialfile=initialfile,
+            defaultextension=".jpg",
+            filetypes=[("JPEG 图片", "*.jpg *.jpeg"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        layout = simpledialog.askstring("布局", "输入布局: vertical(上下) 或 horizontal(左右)，直接回车默认 vertical", initialvalue="vertical")
+        layout = (layout or "vertical").strip().lower() or "vertical"
+        if layout not in ("vertical", "horizontal"):
+            layout = "vertical"
+        try:
+            out = render_to_image(score, path, layout=layout)
+            messagebox.showinfo("导出成功", f"已保存到 {out}")
+        except ImportError as e:
+            import traceback
+            show_error_detail(self.root, "导出失败", "请安装 Pillow: pip install Pillow", traceback.format_exc())
+        except Exception as e:
+            import traceback
+            show_error_detail(self.root, "导出失败", str(e), traceback.format_exc())
+
     def _on_format(self):
         """格式化：对齐小节号"""
         self._on_align()
     
-    def _on_copy(self):
+    def _on_cut(self):
+        """剪切选中内容到剪贴板"""
+        try:
+            sel = self.text.get(tk.SEL_FIRST, tk.SEL_LAST)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(sel)
+            self.root.update()
+            self.text.delete(tk.SEL_FIRST, tk.SEL_LAST)
+            self._schedule_auto_save()
+            self._schedule_preview()
+        except tk.TclError:
+            pass  # 无选中内容
+
+    def _on_copy_selection(self):
+        """复制选中内容到剪贴板"""
+        try:
+            sel = self.text.get(tk.SEL_FIRST, tk.SEL_LAST)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(sel)
+            self.root.update()
+            self.status_label.config(text="已复制")
+            self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+        except tk.TclError:
+            pass  # 无选中内容
+
+    def _on_paste(self):
+        """从剪贴板粘贴到光标位置"""
+        try:
+            content = self.root.clipboard_get()
+            self.text.insert(tk.INSERT, content)
+            self._schedule_auto_save()
+            self._schedule_preview()
+        except tk.TclError:
+            pass  # 剪贴板为空或不可用
+
+    def _on_select_all(self):
+        """全选编辑器内容"""
+        self.text.tag_add(tk.SEL, "1.0", tk.END)
+        self.text.mark_set(tk.INSERT, "1.0")
+        self.text.see(tk.INSERT)
+
+    def _on_text_context_menu(self, event):
+        """编辑器右键菜单：剪切、复制、粘贴、全选；若光标在和弦上则显示和弦操作"""
+        self.text.focus_set()
+        idx = self.text.index(f"@{event.x},{event.y}")
+        content = self.text.get(1.0, tk.END)
+        cursor_pos = len(self.text.get(1.0, idx))
+        try:
+            sel_first = self.text.index(tk.SEL_FIRST)
+            sel_last = self.text.index(tk.SEL_LAST)
+            sel_start = len(self.text.get(1.0, sel_first))
+            sel_end = len(self.text.get(1.0, sel_last))
+            if sel_start == sel_end:
+                sel_start = sel_end = None
+        except tk.TclError:
+            sel_start = sel_end = None
+        chords = get_chords_to_operate(content, sel_start, sel_end, cursor_pos)
+        has_two_note = any(len(c[2].rstrip("_").split("/")) == 2 for c in chords)
+
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="剪切", command=self._on_cut)
+        menu.add_command(label="复制", command=self._on_copy_selection)
+        menu.add_command(label="粘贴", command=self._on_paste)
+        menu.add_separator()
+        menu.add_command(label="全选", command=self._on_select_all)
+        if chords:
+            menu.add_separator()
+            swap_state = tk.NORMAL if has_two_note else tk.DISABLED
+            menu.add_command(label="和弦：交换两音", command=self._on_chord_swap, state=swap_state)
+            menu.add_command(label="和弦：按音高升序", command=self._on_chord_sort_asc)
+            menu.add_command(label="和弦：按音高降序", command=self._on_chord_sort_desc)
+        menu.add_separator()
+        dur_state = tk.NORMAL if (sel_start is not None and sel_end is not None) else tk.DISABLED
+        menu.add_command(label="时值÷2", command=self._on_duration_divide_two, state=dur_state)
+        menu.add_command(label="时值×2", command=self._on_duration_multiply_two, state=dur_state)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _on_copy_all(self):
+        """复制全部内容到剪贴板"""
         content = self.text.get(1.0, tk.END)
         self.root.clipboard_clear()
         self.root.clipboard_append(content)
         self.root.update()
-        self.status_label.config(text="已复制到剪贴板")
+        self.status_label.config(text="已复制全部到剪贴板")
         self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+
+    def _get_selection_and_cursor(self) -> tuple[int | None, int | None, int | None]:
+        """返回 (sel_start, sel_end, cursor_pos) 字符位置，0-based"""
+        content = self.text.get(1.0, tk.END)
+        try:
+            sel_first = self.text.index(tk.SEL_FIRST)
+            sel_last = self.text.index(tk.SEL_LAST)
+            sel_start = len(self.text.get(1.0, sel_first))
+            sel_end = len(self.text.get(1.0, sel_last))
+            if sel_start == sel_end:
+                sel_start = sel_end = None
+        except tk.TclError:
+            sel_start = sel_end = None
+        try:
+            insert_idx = self.text.index(tk.INSERT)
+            cursor_pos = len(self.text.get(1.0, insert_idx))
+        except tk.TclError:
+            cursor_pos = None
+        return sel_start, sel_end, cursor_pos
+
+    def _apply_chord_operation(self, transform):
+        """对选区/光标处的和弦应用变换。transform(chord_text, tonality_offset) -> new_text"""
+        content = self.text.get(1.0, tk.END)
+        sel_start, sel_end, cursor_pos = self._get_selection_and_cursor()
+        chords = get_chords_to_operate(content, sel_start, sel_end, cursor_pos)
+        if not chords:
+            return
+        tonality = get_tonality_offset(content)
+        # 从后往前替换，避免位置偏移
+        for start, end, chord_text in reversed(chords):
+            new_text = transform(chord_text, tonality)
+            if new_text is not None and new_text != chord_text:
+                self.text.delete(f"1.0+{start}c", f"1.0+{end}c")
+                self.text.insert(f"1.0+{start}c", new_text)
+        self._schedule_auto_save()
+        self._schedule_preview()
+        self._do_highlights()
+
+    def _on_chord_swap(self):
+        """交换和弦中两音顺序（仅两音和弦）"""
+        def transform(ct, _):
+            return chord_swap_two(ct)
+        self._apply_chord_operation(transform)
+
+    def _on_chord_sort_asc(self):
+        """按音高升序排列和弦内各音"""
+        def transform(ct, to):
+            return chord_sort(ct, ascending=True, tonality_offset=to)
+        self._apply_chord_operation(transform)
+
+    def _on_chord_sort_desc(self):
+        """按音高降序排列和弦内各音"""
+        def transform(ct, to):
+            return chord_sort(ct, ascending=False, tonality_offset=to)
+        self._apply_chord_operation(transform)
+
+    def _apply_duration_operation(self, transform):
+        """对选区内的音符应用时值变换。无选区则不操作。transform(token) -> new_token or None"""
+        sel_start, sel_end, _ = self._get_selection_and_cursor()
+        if sel_start is None or sel_end is None:
+            return
+        content = self.text.get(1.0, tk.END)
+        tokens = find_note_tokens_in_range(content, sel_start, sel_end)
+        if not tokens:
+            return
+        for start, end, tok in reversed(tokens):
+            new_tok = transform(tok)
+            if new_tok is not None and new_tok != tok:
+                self.text.delete(f"1.0+{start}c", f"1.0+{end}c")
+                self.text.insert(f"1.0+{start}c", new_tok)
+        self._schedule_auto_save()
+        self._schedule_preview()
+        self._do_highlights()
+
+    def _on_duration_divide_two(self):
+        """时值除以2：每个音符后加 _（四分→八分→十六分，最多十六分）"""
+        self._apply_duration_operation(duration_divide_two)
+
+    def _on_duration_multiply_two(self):
+        """时值乘以2：每个音符去掉一个 _（十六分→八分→四分，最多四分）"""
+        self._apply_duration_operation(duration_multiply_two)
+
+    def _on_voicevox_voices(self):
+        """打开 VOICEVOX 音色选择对话框（音色列表 + 利用規約 + 试听 + 清唱生成）"""
+        try:
+            from voicevox_voice_dialog import show_voicevox_dialog
+            get_score = lambda: self.text.get(1.0, tk.END)
+            get_current_file = lambda: self.current_file_path
+            show_voicevox_dialog(self.root, get_score_callback=get_score, get_current_file_callback=get_current_file)
+        except ImportError as e:
+            import traceback
+            show_error_detail(self.root, "错误", f"无法加载 VOICEVOX 模块: {e}", traceback.format_exc())
     
     def _on_open_workspace(self):
         default_dir = WORKSPACES_DIR
@@ -358,8 +626,10 @@ class App:
             self.root.title(f"简谱演奏 - {path.name}")
             self._do_highlights()
             self._highlight_current_file_in_workspace()
+            self.root.after(100, self._update_preview)
         except Exception as e:
-            messagebox.showerror("打开失败", str(e))
+            import traceback
+            show_error_detail(self.root, "打开失败", str(e), traceback.format_exc())
     
     def _save_to(self, path: Path, silent: bool = False):
         try:
@@ -373,7 +643,8 @@ class App:
             if self.workspace_root and path.parent == self.workspace_root:
                 self._refresh_workspace_list()
         except Exception as e:
-            messagebox.showerror("保存失败", str(e))
+            import traceback
+            show_error_detail(self.root, "保存失败", str(e), traceback.format_exc())
     
     def _set_workspace(self, path: Path):
         self.workspace_root = path
@@ -503,7 +774,7 @@ class App:
         if new_path == old_path:
             return
         if new_path.exists():
-            messagebox.showerror("重命名失败", f"文件已存在：{new_name}")
+            show_error_detail(self.root, "重命名失败", f"文件已存在：{new_name}")
             return
         try:
             old_path.rename(new_path)
@@ -514,7 +785,8 @@ class App:
             self.status_label.config(text="已重命名")
             self.root.after(2000, lambda: self.status_label.config(text="就绪"))
         except Exception as e:
-            messagebox.showerror("重命名失败", str(e))
+            import traceback
+            show_error_detail(self.root, "重命名失败", str(e), traceback.format_exc())
 
     def _on_workspace_delete(self, idx: int):
         """删除工作区文件"""
@@ -534,7 +806,8 @@ class App:
             self.status_label.config(text="已删除")
             self.root.after(2000, lambda: self.status_label.config(text="就绪"))
         except Exception as e:
-            messagebox.showerror("删除失败", str(e))
+            import traceback
+            show_error_detail(self.root, "删除失败", str(e), traceback.format_exc())
     
     def _build_ui(self):
         colors = self._theme_colors()
@@ -606,6 +879,15 @@ class App:
         self.btn_stop.pack(side=tk.LEFT, padx=(0, 5))
         
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+
+        self.btn_duration_divide = ttk.Button(toolbar, text="时值÷2", command=self._on_duration_divide_two, state=tk.DISABLED)
+        self.btn_duration_divide.pack(side=tk.LEFT, padx=(0, 2))
+        self.btn_duration_multiply = ttk.Button(toolbar, text="时值×2", command=self._on_duration_multiply_two, state=tk.DISABLED)
+        self.btn_duration_multiply.pack(side=tk.LEFT, padx=(0, 5))
+
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+
+        ttk.Button(toolbar, text="VOICEVOX 音色", command=self._on_voicevox_voices).pack(side=tk.LEFT, padx=(0, 5))
         
         ttk.Button(toolbar, text="打开示例工作区", command=self._on_open_example_workspace).pack(side=tk.LEFT, padx=(0, 5))
         
@@ -648,6 +930,25 @@ class App:
         self.text.configure(xscrollcommand=hscroll.set)
         self.text.pack(fill=tk.BOTH, expand=True, pady=5)
         hscroll.pack(fill=tk.X)
+
+        # 实时预览面板（带歌词简谱）
+        self._preview_frame = ttk.LabelFrame(main, text="带歌词简谱预览", padding=5)
+        self._preview_frame.pack(fill=tk.BOTH, expand=False, pady=(5, 0))
+        self._preview_canvas = tk.Canvas(
+            self._preview_frame,
+            bg="#ffffff",
+            highlightthickness=0,
+            height=180,
+        )
+        prev_scroll_y = ttk.Scrollbar(self._preview_frame, orient=tk.VERTICAL, command=self._preview_canvas.yview)
+        prev_scroll_x = ttk.Scrollbar(self._preview_frame, orient=tk.HORIZONTAL, command=self._preview_canvas.xview)
+        self._preview_canvas.configure(yscrollcommand=prev_scroll_y.set, xscrollcommand=prev_scroll_x.set)
+        self._preview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        prev_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        prev_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self._preview_photo: tk.PhotoImage | None = None
+        self._preview_timer = None
+
         # 默认加载工作区第一个文件（已由上方 _set_workspace 设置 current_file_path）
         if self.current_file_path and self.current_file_path.exists():
             self.text.insert(tk.END, self.current_file_path.read_text(encoding="utf-8"))
@@ -659,9 +960,29 @@ class App:
             else:
                 self.text.insert(tk.END, SAMPLE_SCORE)
         self.text.bind("<Control-f>", self._on_align)
+        def _edit_bind(seq, handler):
+            def _handler(e):
+                handler()
+                return "break"
+            self.text.bind(seq, _handler)
+
+        _edit_bind("<Control-x>", self._on_cut)
+        _edit_bind("<Control-c>", self._on_copy_selection)
+        _edit_bind("<Control-v>", self._on_paste)
+        _edit_bind("<Control-a>", self._on_select_all)
+        _edit_bind("<Control-Shift-C>", self._on_copy_all)
+        if sys.platform == "darwin":
+            _edit_bind("<Command-x>", self._on_cut)
+            _edit_bind("<Command-c>", self._on_copy_selection)
+            _edit_bind("<Command-v>", self._on_paste)
+            _edit_bind("<Command-a>", self._on_select_all)
         self.root.after(100, self._do_highlights)
+        self.root.after(150, self._update_preview)
+        self.root.after(200, self._update_duration_buttons_state)
         self.text.bind("<KeyRelease>", self._on_key_release)
         self.text.bind("<ButtonRelease-1>", self._on_text_button_release)
+        self.text.bind("<Button-3>", self._on_text_context_menu)
+        self.text.bind("<Button-2>", self._on_text_context_menu)  # macOS 右键
         # 拖拽从 Listbox 到 Text 时，释放事件会发给 Listbox（鼠标被捕获），故用全局监听
         self.root.bind_all("<ButtonRelease-1>", self._on_global_drop_check)
 
@@ -694,6 +1015,7 @@ class App:
             self.text.tag_configure(f"bracket{i}", background=c)
         self.text.tag_configure("diag_error", underline=True, underlinefg="#c55")
         self.text.tag_configure("diag_warning", underline=True, underlinefg="#c9a227")
+        self.text.tag_configure("comment", foreground="#2d5a2d" if not self._dark_mode else "#5a8a5a")
         self._bar_check_enabled = True  # \no_bar_check 时可关闭
         self._highlight_timer = None
         self._auto_save_timer = None
@@ -704,7 +1026,7 @@ class App:
         hint_bg = "#2d2d2d" if self._dark_mode else "#f0f0f0"
         self.hint = tk.Label(
             main,
-            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线(可跨小节), # b ^ 升降还原, [xxx](...) 记号, [dc][fine] 反复, \\tts{文本}{zh/ja/en} 篇章间语音, \\import{文件名} 导入 | 从工作区拖放插入 | Ctrl+F 对齐 | 括号高亮",
+            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线(可跨小节), # b ^ 升降还原, [xxx](...) 记号, [dc][fine] 反复, // 单行注释, \\tts{文本}{zh/ja/en}{voice_id} 篇章间语音(voice_id用VOICEVOX), \\lyrics{字/字}{part}{voice_id}{melody} 歌词(melody:0第一音1第二音), 1(啊) 行内歌词, \\import{文件名} 导入 | 文件→导出带歌词简谱(JPG) | Ctrl+F 对齐 | 括号高亮",
             font=("", 9),
             fg=colors["hint_fg"],
             bg=hint_bg,
@@ -982,6 +1304,7 @@ class App:
             self._schedule_auto_save()
             self.root.after(50, self._do_highlights)
             self.root.after(50, self._update_status_bar)
+            self._schedule_preview()
         except (tk.TclError, AttributeError):
             pass
 
@@ -1000,8 +1323,17 @@ class App:
         """处理输入框内点击/释放，更新状态栏；拖放由 _on_global_drop_check 处理"""
         self._on_cursor_move(event)
 
+    def _update_duration_buttons_state(self):
+        """无选区时灰掉时值按钮"""
+        sel_start, sel_end, _ = self._get_selection_and_cursor()
+        has_selection = sel_start is not None and sel_end is not None
+        state = tk.NORMAL if has_selection else tk.DISABLED
+        self.btn_duration_divide.config(state=state)
+        self.btn_duration_multiply.config(state=state)
+
     def _on_cursor_move(self, event=None):
         self._update_status_bar()
+        self._update_duration_buttons_state()
 
     def _update_status_bar(self, score=None):
         """更新状态栏：行列号、总拍数、小节数"""
@@ -1070,9 +1402,18 @@ class App:
             self.text.see(f"{d.line}.{d.column}")
             self.text.mark_set(tk.INSERT, f"{d.line}.{d.column}")
 
+    def _highlight_comments(self):
+        """// 单行注释显示为深绿色"""
+        self.text.tag_remove("comment", "1.0", tk.END)
+        content = self.text.get(1.0, tk.END)
+        for m in re.finditer(r"//[^\n]*", content):
+            start, end = m.span()
+            self.text.tag_add("comment", f"1.0+{start}c", f"1.0+{end}c")
+
     def _do_highlights(self):
-        """执行括号高亮、诊断波浪线（错误红/警告黄）"""
+        """执行括号高亮、注释高亮、诊断波浪线（错误红/警告黄）"""
         self._highlight_brackets()
+        self._highlight_comments()
         self._update_diagnostics()
     
     def _on_key_release(self, event=None):
@@ -1080,7 +1421,9 @@ class App:
             self.text.after_cancel(self._highlight_timer)
         self._highlight_timer = self.text.after(300, self._do_highlights)
         self.root.after(50, self._update_status_bar)
+        self._update_duration_buttons_state()
         self._schedule_auto_save()
+        self._schedule_preview()
     
     def _schedule_auto_save(self):
         """延迟 1.5 秒后自动保存"""
@@ -1093,6 +1436,47 @@ class App:
         self._auto_save_timer = None
         if self.current_file_path:
             self._save_to(self.current_file_path, silent=True)
+
+    def _schedule_preview(self):
+        """延迟更新预览，避免输入时频繁渲染"""
+        if self._preview_timer:
+            self.root.after_cancel(self._preview_timer)
+        self._preview_timer = self.root.after(400, self._update_preview)
+
+    def _update_preview(self):
+        """实时渲染带歌词简谱预览"""
+        self._preview_timer = None
+        try:
+            from PIL import ImageTk
+        except ImportError:
+            return
+        content = self.text.get(1.0, tk.END)
+        if not content.strip():
+            self._preview_canvas.delete("all")
+            return
+        base_dir = (
+            self.workspace_root
+            if self.workspace_root and self.workspace_root.is_dir()
+            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+        )
+        try:
+            content = expand_imports(content, base_dir)
+        except Exception:
+            pass
+        try:
+            score = parse(content)
+        except Exception:
+            return
+        try:
+            pil_img = render_to_pil(score, layout="vertical", font_size=18)
+        except Exception:
+            return
+        w, h = pil_img.size
+        photo = ImageTk.PhotoImage(pil_img)
+        self._preview_photo = photo
+        self._preview_canvas.delete("all")
+        self._preview_canvas.config(scrollregion=(0, 0, w, h))
+        self._preview_canvas.create_image(0, 0, anchor=tk.NW, image=photo)
     
     def _on_play(self):
         if self.is_playing:
@@ -1109,7 +1493,8 @@ class App:
         try:
             score = expand_imports(score, base_dir)
         except (FileNotFoundError, ValueError, OSError) as e:
-            messagebox.showerror("导入错误", str(e))
+            import traceback
+            show_error_detail(self.root, "导入错误", str(e), traceback.format_exc())
             return
 
         self.is_playing = True
@@ -1129,7 +1514,9 @@ class App:
             try:
                 self.player.play_score(score)
             except Exception as e:
-                self.root.after(0, lambda err=e: messagebox.showerror("播放错误", str(err)))
+                import traceback
+                tb = traceback.format_exc()
+                self.root.after(0, lambda: show_error_detail(self.root, "播放错误", str(e), tb))
             finally:
                 self.root.after(0, self._on_play_finished)
         

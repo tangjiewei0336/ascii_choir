@@ -60,7 +60,13 @@ def _check_bar_duration(text: str, score) -> list[Diagnostic]:
 
     bar_start = None
     bar_idx = 0
-    for i, c in enumerate(text):
+    i = 0
+    while i < len(text):
+        if i < len(text) - 1 and text[i : i + 2] == "//":
+            while i < len(text) and text[i] != "\n":
+                i += 1
+            continue
+        c = text[i]
         if c == "|":
             if bar_start is not None:
                 if bar_idx < len(bars_with_expected):
@@ -80,6 +86,7 @@ def _check_bar_duration(text: str, score) -> list[Diagnostic]:
                             ))
                 bar_idx += 1
             bar_start = i
+        i += 1
     if bar_start is not None and bar_idx < len(bars_with_expected):
         bar, beats_per_bar = bars_with_expected[bar_idx]
         if beats_per_bar is not None:
@@ -103,6 +110,8 @@ def _check_unrecognized(text: str) -> list[Diagnostic]:
     diags: list[Diagnostic] = []
     lines = text.split("\n")
     for line_no, line in enumerate(lines, 1):
+        if "//" in line:
+            line = line[: line.index("//")].rstrip()
         stripped = line.strip()
         if stripped.startswith("\\"):
             continue

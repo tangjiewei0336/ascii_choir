@@ -1,3 +1,13 @@
+# 简谱演奏
+
+如果需要使用VOCALOID功能，请在启动了docker的命令行运行：
+
+**Docker 启动**：
+```bash
+docker pull voicevox/voicevox_engine:cpu-latest
+docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
+```
+
 ## 记号介绍
 
 #### 1. `[]` 表示奏法记号或简谱格式记号，目前支持如下记号（同组记号之间互斥）：
@@ -189,10 +199,10 @@
 使用\no_bar_check即可禁用小节号，同时beat也无效。
 
 ### TTS 语音（篇章间）
-`\tts{文本}` 或 `\tts{文本}{语言}` 用于在篇章之间插入语音朗读，**仅可插入在篇章之间**（双换行分隔的块）。
+`\tts{文本}`、`\tts{文本}{语言}` 或 `\tts{文本}{语言}{voice_id}` 用于在篇章之间插入语音朗读，**仅可插入在篇章之间**（双换行分隔的块）。
 - 支持语言：`zh` 中文、`ja` 日语、`en` 英语（默认）
-- 需安装 `edge-tts`，播放时需网络
-- 音频解码：优先用 `audioread`（macOS 可用系统 Core Audio，无需 ffmpeg）；否则需 `pydub` + `ffmpeg`（macOS: `brew install ffmpeg`）
+- **voice_id**（可选）：VOICEVOX 的 style_id。若填写，则用 VOICEVOX 合成，不再使用 edge-tts；需先启动 voicevox_engine（默认 http://127.0.0.1:50021），可在 TTS 菜单 → VOICEVOX 音色选择 中查看并复制命令
+- 未填 voice_id 时：需安装 `edge-tts`，播放时需网络；音频解码优先用 `audioread`，否则需 `pydub` + `ffmpeg`
 
 有效的例子：
 ```text
@@ -208,7 +218,47 @@
 
 \tts{Verse two}{en}
 
+\tts{こんにちは}{ja}{1}
+
 |1 2 3 4|5 6 7 1|
+```
+
+### 歌词（\lyrics、行内）
+`\lyrics{字1/字2/字3}` 将斜杠分隔的每个字与一个音符对齐（连音线视为一个音符）。溢出自动添加到下一行第一个未对齐的音符。
+- `\lyrics{...}{part_index}`：**声部索引**，指定歌词追加到第几个声部（0 起）。多声部时，0=第一行旋律，1=第二行旋律，以此类推
+- `\lyrics{...}{part_index}{voice_id}`：voice_id 为 VOICEVOX style_id（可选）。**有 voice_id 时播放会用 VOICEVOX 歌唱合成歌声**，替代 WAV 音色
+- `\lyrics{...}{part_index}{voice_id}{melody}`：**melody** 为和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
+- 行内歌词：`1(啊) 2(一)` 在音符后加括号（未测试！！）
+
+```text
+\tonality{1}
+\beat{4/4}
+\lyrics{do/re/mi/fa}
+
+|1 2 3 4|5 6 7 1|
+```
+
+多声部示例（`\lyrics{音节}{part_index}{voice_id}{melody}` 四个参数依次为）：
+- **音节**：斜杠分隔的字，与音符一一对齐
+- **part_index**：声部索引（0 起），0=第一行旋律，1=第二行旋律
+- **voice_id**：VOICEVOX 的 style_id，有则用歌唱合成；可省略
+- **melody**：和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
+
+```text
+\tonality{1}
+\beat{4/4}
+\lyrics{啊/呀/哦}{0}{5}{0}  // 音节/声部0/音色5/第一音旋律
+& 1 2 3 | 4 5 6
+```
+
+和弦 melody 示例（同一声部有和弦时，`0` 取每和弦第一音、`1` 取第二音）：但目前只能启用一个
+```text
+\tonality{1}
+\beat{4/4}
+\bpm{60}
+\lyrics{低/低/音/音/唱/唱}{0}{5}{0}   // melody=0：取 1/3、2/4、3/5、4/6、5/7、6/1. 中的 1、2、3、4、5、6
+\lyrics{高/高/音/音/唱/唱}{0}{5}{1}   // melody=1：取各和弦第二音 3、4、5、6、7、1.
+& |1/3 2/4 3/5|4/6 5/7 6/1.|
 ```
 
 ### 导入文件（\import）
@@ -229,6 +279,19 @@
 
 \import{副歌.choir}
 ```
+
+## VOICEVOX 音色选择
+
+TTS 菜单 → **VOICEVOX 音色选择** 可打开音色对话框：
+- 左侧：扁平音色列表，**点击即试听**
+- 右侧：选中音色的全身照与利用規約
+- **复制 TTS 命令**：将 `\tts{こんにちは}{ja}{style_id}` 复制到剪贴板
+- **复制 歌词命令**：将 `\lyrics{字/字}{0}{style_id}{0}` 复制到剪贴板
+- **清唱生成**：用当前选中音色将当前编辑器中的简谱合成为歌声（无 WAV 伴奏），直接播放
+
+使用前需启动 voicevox_engine（默认 http://127.0.0.1:50021）。
+
+**歌词歌声合成**：当 `\lyrics{...}{part}{voice_id}{melody}` 中指定了 voice_id 时，播放该篇章会用 VOICEVOX 歌唱 API 合成歌声。**注意**：歌唱仅支持 `/singers` 中的角色（如波音リツ），若所选音色不支持歌唱，程序会自动使用可用的歌唱角色。
 
 ## 编辑器功能
 
