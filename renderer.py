@@ -6,6 +6,8 @@
 from pathlib import Path
 from typing import Optional
 
+from PIL import Image
+
 from parser import (
     ParsedScore,
     Part,
@@ -20,28 +22,47 @@ from parser import (
 # 全角数字 ０１２３４５６７８９，保证 CJK 字体下对齐
 _FULLWIDTH = "０１２３４５６７８９"
 _BAR_FULLWIDTH = "｜"
+# 升降号符号：0=无，1=♯，-1=♭
+_ACC_SYMBOLS = {1: "♯", -1: "♭"}
 
 
-def _midi_to_display(midi: int, tonality_offset: int) -> tuple[str, int, int]:
+def _midi_to_accidental(midi: int, tonality_offset: int) -> int:
+    """根据 MIDI 与调性推算升降号。返回 0=无，1=升，-1=降。简谱惯例：Eb 用 3b，D# 用 2#"""
+    base = midi - tonality_offset
+    pc = base % 12
+    if pc in _PC_TO_DEGREE:
+        return 0
+    if (pc + 1) % 12 in _PC_TO_DEGREE:
+        return -1  # 降号（如 Eb=3b）
+    if (pc - 1) % 12 in _PC_TO_DEGREE:
+        return 1  # 升号（如 D#=2#）
+    return 0
+
+
+def _midi_to_display(midi: int, tonality_offset: int) -> tuple[str, int, int, int]:
     """
     将 MIDI 转为简谱显示。
-    返回 (全角数字, 下方点数, 上方点数)。
-    真实乐谱：低音点在下、高音点在上。
+    返回 (全角数字, 下方点数, 上方点数, accidental)。
+    真实乐谱：低音点在下、高音点在上。accidental: 0=无，1=♯，-1=♭
     """
     base = midi - tonality_offset
     pc = base % 12
     octave = base // 12 - 5
-    degree = _PC_TO_DEGREE.get(pc)
-    if degree is None:
-        degree = 1
+    acc = _midi_to_accidental(midi, tonality_offset)
+    if acc == 1:
+        degree = _PC_TO_DEGREE.get((pc - 1) % 12, 1)
+    elif acc == -1:
+        degree = _PC_TO_DEGREE.get((pc + 1) % 12, 1)
+    else:
+        degree = _PC_TO_DEGREE.get(pc, 1)
     s = _FULLWIDTH[degree]
     dots_below = max(0, -octave)
     dots_above = max(0, octave)
-    return s, dots_below, dots_above
+    return s, dots_below, dots_above, acc
 
 
-# 显示结构：单音/休止 (degree_str, dots_below, dots_above)；和弦 list of that
-DisplayItem = tuple[str, int, int] | list[tuple[str, int, int]]
+# 显示结构：单音/休止 (degree_str, dots_below, dots_above, accidental)；和弦 list of that
+DisplayItem = tuple[str, int, int, int] | list[tuple[str, int, int, int]]
 
 
 def _duration_to_beam_level(duration_beats: float, base_duration: float) -> int:
@@ -95,7 +116,7 @@ def _assign_lyrics_to_notes(
                 bar_result: list[tuple[DisplayItem, Optional[str], Optional[float], bool, bool, list[int], list[int]]] = []
                 for ev in bar.events:
                     if isinstance(ev, RestEvent):
-                        bar_result.append((("０", 0, 0), None, ev.duration_beats, False, False, [], []))
+                        bar_result.append((("０", 0, 0, 0), None, ev.duration_beats, False, False, [], []))
                         continue
                     dur = getattr(ev, "duration_beats", None)
                     tied_to = getattr(ev, "tied_to_next", False)
@@ -148,12 +169,13 @@ def render_to_pil(
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/msgothic.ttc",
     ]
-    font = font_small = None
+    font = font_small = font_acc = None
     for fp in _font_paths:
         try:
             if Path(fp).exists():
                 font = ImageFont.truetype(fp, font_size)
                 font_small = ImageFont.truetype(fp, font_size - 4)
+                font_acc = ImageFont.truetype(fp, max(10, font_size // 2))  # 升降号小符号
                 break
         except OSError:
             continue
@@ -161,9 +183,10 @@ def render_to_pil(
         try:
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
             font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size - 4)
+            font_acc = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", max(10, font_size // 2))
         except OSError:
             font = ImageFont.load_default()
-            font_small = font
+            font_small = font_acc = font
 
     pad = 20
     line_height = font_size + 8
@@ -205,7 +228,7 @@ def render_to_pil(
                 rows.append(([], sec_idx))
 
     if not rows:
-        rows = [([(("１", 0, 0), None, None, False, False, [], []), (("２", 0, 0), None, None, False, False, [], []), (("３", 0, 0), None, None, False, False, [], []), (("４", 0, 0), None, None, False, False, [], [])], 0)]
+        rows = [([(("１", 0, 0, 0), None, None, False, False, [], []), (("２", 0, 0, 0), None, None, False, False, [], []), (("３", 0, 0, 0), None, None, False, False, [], []), (("４", 0, 0, 0), None, None, False, False, [], [])], 0)]
 
     gap = 10
     beam_spacing = 4  # 符尾横线间距
@@ -214,8 +237,13 @@ def render_to_pil(
     dot_offset = 4
     draw_offset_y = -5  # 字体偏上修正
 
-    def _draw_single_note(draw, x: int, y: int, s: str, dots_below: int, dots_above: int, font, r=dot_r, off=dot_offset, text_offset_y: int = 0) -> tuple[int, int]:
-        """绘制单个音符（含高低音点）。text_offset_y 仅移动数字，高低音点不动"""
+    def _draw_single_note(draw, x: int, y: int, s: str, dots_below: int, dots_above: int, font, r=dot_r, off=dot_offset, text_offset_y: int = 0, accidental: int = 0, font_acc=None) -> tuple[int, int]:
+        """绘制单个音符（含高低音点、升降号）。升降号以小符号绘于数字左上角，不改变数字位置"""
+        acc_sym = _ACC_SYMBOLS.get(accidental, "")
+        if acc_sym and font_acc:
+            acc_bbox = font_acc.getbbox(acc_sym) if hasattr(font_acc, "getbbox") else (0, 0, font_acc.getsize(acc_sym)[0], font_acc.getsize(acc_sym)[1])
+            acc_h = (acc_bbox[3] - acc_bbox[1]) if hasattr(font_acc, "getbbox") else font_acc.getsize(acc_sym)[1]
+            draw.text((x, y - acc_h - 1), acc_sym, fill=(0, 0, 0), font=font_acc)
         bbox = font.getbbox(s) if hasattr(font, "getbbox") else (0, 0, font.getsize(s)[0], font.getsize(s)[1])
         if hasattr(font, "getbbox"):
             w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -252,7 +280,7 @@ def render_to_pil(
             def _w(s):
                 b = cf.getbbox(s) if hasattr(cf, "getbbox") else None
                 return b[2] - b[0] if b else cf.getsize(s)[0]
-            w = max(_w(s) for s, _, _ in item[:4]) if item else measure("１")[0]
+            w = max(_w(s) for s, _, _, _ in item[:4]) if item else measure("１")[0]
         else:
             w = measure(item[0])[0]
         # 增时线：每多一拍加一条横线宽度
@@ -280,7 +308,7 @@ def render_to_pil(
         def _cw(s):
             b = cf.getbbox(s) if hasattr(cf, "getbbox") else None
             return b[2] - b[0] if b else cf.getsize(s)[0]
-        single_w = max(_cw(s) for s, _, _ in items[:4])
+        single_w = max(_cw(s) for s, _, _, _ in items[:4])
         ys = [start_y + i * step + single_h // 2 for i in range(n)]
         return ys, single_w
 
@@ -306,10 +334,11 @@ def render_to_pil(
         items: list[tuple[str, int, int]] = [item] if isinstance(item, tuple) else item
         row_center = y + ch // 2
         if len(items) <= 1:
-            w = measure(items[0][0])[0]
-            h = (font.getbbox(items[0][0])[3] - font.getbbox(items[0][0])[1]) if hasattr(font, "getbbox") else font_size + 4
+            s, db, da, acc = items[0][0], items[0][1], items[0][2], items[0][3] if len(items[0]) > 3 else 0
+            w = measure(s)[0]
+            h = (font.getbbox(s)[3] - font.getbbox(s)[1]) if hasattr(font, "getbbox") else font_size + 4
             base_y = row_center - h // 2
-            _draw_single_note(draw, x, base_y, items[0][0], items[0][1], items[0][2], font, text_offset_y=num_offset_y)
+            _draw_single_note(draw, x, base_y, s, db, da, font, text_offset_y=num_offset_y, accidental=acc, font_acc=font_acc)
             return w
         # 和弦：上下堆叠，最多 4 个，字体与点按比例缩小
         notes = items[:4]
@@ -321,25 +350,38 @@ def render_to_pil(
         def _cw(s):
             b = cf.getbbox(s) if hasattr(cf, "getbbox") else None
             return b[2] - b[0] if b else cf.getsize(s)[0]
-        single_w = max(_cw(s) for s, _, _ in notes)
+        single_w = max(_cw(s) for s, _, _, _ in notes)
         single_h = (cf.getbbox("１")[3] - cf.getbbox("１")[1]) if hasattr(cf, "getbbox") else int(font_size * scale) + 4
         step_scale = [0, 0, 1.0, 0.95, 0.85][n]
         step = max(6, int(single_h * step_scale))
         total_h = step * (n - 1) + single_h
         start_y = row_center - total_h // 2
-        for i, (s, dots_below, dots_above) in enumerate(notes):
+        for i, note_item in enumerate(notes):
+            s, dots_below, dots_above = note_item[0], note_item[1], note_item[2]
+            acc = note_item[3] if len(note_item) > 3 else 0
             ny = start_y + i * step
             cx = x + (single_w - _cw(s)) // 2
-            _draw_single_note(draw, cx, ny, s, dots_below, dots_above, cf, r=cr, off=coff, text_offset_y=num_offset_y)
+            _draw_single_note(draw, cx, ny, s, dots_below, dots_above, cf, r=cr, off=coff, text_offset_y=num_offset_y, accidental=acc, font_acc=font_acc)
         return single_w
 
     def row_width(row_items: list, sec_idx: int) -> int:
         base_dur = base_durations[sec_idx] if sec_idx < len(base_durations) else 0.25
         return sum(_measure_item(d, dur, base_dur) + gap for d, _, dur, _, _, _, _ in row_items)
 
+    def _has_accidental(disp: DisplayItem | str) -> bool:
+        """检查是否有升降号"""
+        if disp == "|" or not disp:
+            return False
+        items = [disp] if isinstance(disp, tuple) else disp
+        for it in (items[:4] if isinstance(items, list) else [items]):
+            if len(it) > 3 and it[3] != 0:
+                return True
+        return False
+
     def row_height(row_items: list, sec_idx: int) -> int:
         has_lyric = any(ly for _, ly, _, _, _, _, _ in row_items if ly)
-        base = line_height
+        has_acc = any(_has_accidental(d) for d, _, _, _, _, _, _ in row_items if d != "|")
+        base = line_height + (max(8, font_size // 2) if has_acc else 0)
         chord_h = max((_chord_height(d) for d, _, _, _, _, _, _ in row_items if isinstance(d, list) and len(d) > 1), default=0)
         base_dur = base_durations[sec_idx] if sec_idx < len(base_durations) else 0.25
         max_beam = 0
