@@ -1,6 +1,6 @@
 """
 TTS 辅助：生成语音音频，支持中/日/英
-使用 edge-tts（需网络），若不可用则跳过
+voice_id 有值时用 VOICEVOX，否则用 edge-tts（需网络）
 """
 from pathlib import Path
 from typing import Optional
@@ -17,12 +17,35 @@ VOICE_MAP = {
 _tts_warned: set[str] = set()
 
 
-def generate_tts_audio(text: str, lang: str, sample_rate: int = 44100) -> Optional[tuple[np.ndarray, float]]:
+def generate_tts_audio(
+    text: str, lang: str, sample_rate: int = 44100, voice_id: Optional[int] = None
+) -> Optional[tuple[np.ndarray, float]]:
     """
     生成 TTS 音频，返回 (float32 mono 数组, 时长秒)。
+    voice_id 有值时用 VOICEVOX 合成，否则用 edge-tts。
     若失败返回 None。
     """
     global _tts_warned
+    if voice_id is not None:
+        try:
+            from voicevox_client import synthesize_simple, VOICEVOX_BASE
+            wav_bytes = synthesize_simple(text, voice_id, VOICEVOX_BASE)
+            import io
+            import soundfile as sf
+            data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
+            if len(data.shape) > 1:
+                data = data.mean(axis=1)
+            if sr != sample_rate:
+                ratio = sample_rate / sr
+                new_len = int(len(data) * ratio)
+                indices = np.linspace(0, len(data) - 1, new_len)
+                data = np.interp(indices, np.arange(len(data)), data).astype(np.float32)
+            return data, len(data) / sample_rate
+        except Exception as e:
+            if "voicevox" not in _tts_warned:
+                _tts_warned.add("voicevox")
+                print(f"[TTS] VOICEVOX 合成失败（请确保引擎已启动）: {e}")
+            return None
     try:
         import asyncio
         import edge_tts

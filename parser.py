@@ -97,6 +97,7 @@ class TTSEvent:
     """TTS 事件：仅可插入在篇章之间"""
     text: str
     lang: str  # zh, ja, en
+    voice_id: Optional[int] = None  # VOICEVOX style_id，有则用 VOICEVOX 不用 edge-tts
 
 
 @dataclass
@@ -106,7 +107,7 @@ class ParsedScore:
     sections: list[list[Part]] = field(default_factory=list)  # 篇章列表，每篇章 & 数量相同
     section_settings: list[GlobalSettings] = field(default_factory=list)  # 每篇章的独立设定（覆盖前面的）
     section_tts: list[list[TTSEvent]] = field(default_factory=list)  # 每篇章前的 TTS，section_tts[i] 在 section i 之前播放
-    section_lyrics: list[list[tuple[int, list[str]]]] = field(default_factory=list)  # 每篇章的 \lyrics{(part_index, [syllables])}
+    section_lyrics: list[list[tuple[int, list[str], Optional[int], int]]] = field(default_factory=list)  # 每篇章的 \lyrics{(part_index, syllables, voice_id?, melody_part)}
 
 
 def _copy_settings(s: GlobalSettings) -> GlobalSettings:
@@ -928,41 +929,64 @@ def _split_sections(text: str) -> list[list[str]]:
         sections.append((block, part_lines))
     return sections
 
-def _extract_lyrics(content: str) -> tuple[str, list[tuple[int, list[str]]]]:
+def _extract_lyrics(content: str) -> tuple[str, list[tuple[int, list[str], Optional[int], int]]]:
     """
-    从 content 中提取 \\lyrics{...} 或 \\lyrics{...}{part_index}，返回 (剩余内容, [(part_index, [syllables])])。
-    斜杠分隔的每个字对应一个音符（连音线视为一个音符）。
+    从 content 中提取 \\lyrics{...}、\\lyrics{...}{part_index}、\\lyrics{...}{part_index}{voice_id}、\\lyrics{...}{part_index}{voice_id}{melody}。
+    返回 (剩余内容, [(part_index, syllables, voice_id, melody_part)])。
+    melody_part: 0=第一音旋律 1=第二音旋律（和声时）
     """
-    result: list[tuple[int, list[str]]] = []
+    result: list[tuple[int, list[str], Optional[int], int]] = []
     rest = content
 
     def replacer(m: re.Match) -> str:
         text = m.group(1).strip()
         part_str = m.group(2)
+        voice_str = m.group(3)
+        melody_str = m.group(4)
         part_index = int(part_str.strip()) if part_str else 0
+        voice_id = None
+        if voice_str:
+            try:
+                voice_id = int(voice_str.strip())
+            except ValueError:
+                pass
+        melody_part = 0
+        if melody_str is not None:
+            try:
+                melody_part = int(melody_str.strip())
+                if melody_part not in (0, 1):
+                    melody_part = 0
+            except ValueError:
+                pass
         syllables = [s.strip() for s in text.split("/") if s.strip()]
         if syllables:
-            result.append((part_index, syllables))
+            result.append((part_index, syllables, voice_id, melody_part))
         return ""
 
-    pattern = re.compile(r"\\lyrics\{([^{}]*)\}(?:\{(\d+)\})?\s*", re.I)
+    pattern = re.compile(r"\\lyrics\{([^{}]*)\}(?:\{(\d+)\})?(?:\{([^{}]+)\})?(?:\{([01])\})?\s*", re.I)
     new_content = pattern.sub(replacer, rest)
     return new_content, result
 
 
 def _extract_tts(block: str) -> list[TTSEvent]:
-    """从块中提取 \\tts{text} 或 \\tts{text}{lang}，lang 支持 zh/ja/en"""
+    """从块中提取 \\tts{text}、\\tts{text}{lang}、\\tts{text}{lang}{voice_id}"""
     result: list[TTSEvent] = []
     rest = block
     while rest:
-        m = re.search(r"\\tts\{([^{}]*)\}(?:\{([^{}]+)\})?\s*", rest, re.I)
+        m = re.search(r"\\tts\{([^{}]*)\}(?:\{([^{}]+)\})?(?:\{([^{}]+)\})?\s*", rest, re.I)
         if not m:
             break
         text = m.group(1).strip()
         raw = (m.group(2) or "en").strip().lower()[:2]
         lang = "zh-CN" if raw == "zh" else "ja-JP" if raw == "ja" else "en-US"
+        voice_id = None
+        if m.group(3):
+            try:
+                voice_id = int(m.group(3).strip())
+            except ValueError:
+                pass
         if text:
-            result.append(TTSEvent(text=text, lang=lang))
+            result.append(TTSEvent(text=text, lang=lang, voice_id=voice_id))
         rest = rest[m.end():]
     return result
 
@@ -995,7 +1019,7 @@ def parse(text: str) -> ParsedScore:
     sections: list[list[Part]] = []
     section_settings_list: list[GlobalSettings] = []
     section_tts_list: list[list[TTSEvent]] = []
-    section_lyrics_list: list[list[tuple[int, list[str]]]] = []
+    section_lyrics_list: list[list[tuple[int, list[str], Optional[int], int]]] = []
     pending_tts: list[TTSEvent] = []
     inherit = settings
 

@@ -8,6 +8,7 @@ import io
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import threading
+from pathlib import Path
 from typing import Optional
 
 from voicevox_client import (
@@ -21,6 +22,31 @@ from voicevox_client import (
 
 # 试听用示例文本
 PREVIEW_TEXT = "こんにちは、VOICEVOXです。"
+
+# 记忆上次选择的音色
+def _voicevox_config_path() -> Path:
+    return Path.home() / ".config" / "ascii_choir" / "voicevox_last_style.txt"
+
+
+def _load_last_style_id() -> Optional[int]:
+    try:
+        p = _voicevox_config_path()
+        if p.exists():
+            v = p.read_text(encoding="utf-8").strip()
+            return int(v)
+    except (ValueError, OSError):
+        pass
+    return None
+
+
+def _save_last_style_id(style_id: int) -> None:
+    try:
+        p = _voicevox_config_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(style_id), encoding="utf-8")
+    except OSError:
+        pass
+
 
 # 左侧列表大头照尺寸（上中部裁剪），稍大以增加行距
 LIST_ICON_SIZE = (44, 44)
@@ -135,7 +161,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         super().__init__(parent)
         self.base_url = base_url
         self.title("VOICEVOX 音色选择")
-        self.geometry("900x580")
+        self.geometry("1050x820")
         self.transient(parent)
 
         self.speakers_data: list[dict] = []
@@ -184,6 +210,8 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
 
         btn_frame = ttk.Frame(main)
         btn_frame.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(btn_frame, text="复制 TTS 命令", command=self._copy_tts_cmd).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="复制 歌词命令", command=self._copy_lyrics_cmd).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(btn_frame, text="刷新列表", command=self._load_speakers).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="关闭", command=self.destroy).pack(side=tk.RIGHT)
 
@@ -224,7 +252,18 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                 self.voice_map[item] = (sid, name, uuid)
                 total += 1
         self._status.config(text=f"已加载 {total} 个音色，正在加载头像...")
+        last_style = _load_last_style_id()
         threading.Thread(target=self._load_all_icons, daemon=True).start()
+        # 恢复上次选择的音色（仅展示，不自动试听）
+        if last_style is not None:
+            for iid, (sid, _, _) in self.voice_map.items():
+                if sid == last_style:
+                    def _restore(item=iid):
+                        self.tree.selection_set(item)
+                        self.tree.see(item)
+                        self._on_select(skip_preview=True)
+                    self.after(200, _restore)
+                    break
 
     def _load_all_icons(self) -> None:
         """后台为每项加载 icon"""
@@ -270,7 +309,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         messagebox.showerror("VOICEVOX 连接失败", msg)
         self._status.config(text="连接失败，请确保 voicevox_engine 已启动 (http://localhost:50021)")
 
-    def _on_select(self, event=None) -> None:
+    def _on_select(self, event=None, skip_preview: bool = False) -> None:
         sel = self.tree.selection()
         if not sel:
             return
@@ -281,26 +320,30 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         style_id, speaker_name, speaker_uuid = self.voice_map[item_id]
         self.selected_style_id = style_id
         self.selected_speaker_name = speaker_name
+        _save_last_style_id(style_id)
         info = get_legal_info_for_speaker(speaker_name)
         self.legal_text.config(state=tk.NORMAL)
         self.legal_text.delete(1.0, tk.END)
         self.legal_text.insert(tk.END, info)
         self.legal_text.config(state=tk.DISABLED)
-        # 点击即试听
-        self._status.config(text="正在合成试听...")
+        # 点击即试听（恢复选择时跳过）
+        if skip_preview:
+            self._status.config(text="")
+        else:
+            self._status.config(text="正在合成试听...")
         self.update_idletasks()
 
-        def _synth():
-            try:
-                wav = synthesize_simple(PREVIEW_TEXT, style_id, self.base_url)
-                # 在后台线程播放，避免 sd.wait() 阻塞主线程导致 UI 卡顿
-                threading.Thread(target=_play_wav_bytes, args=(wav,), daemon=True).start()
-                self.after(0, lambda: self._status.config(text=""))
-            except Exception as e:
-                msg = str(e)
-                self.after(0, lambda: self._on_preview_error(msg))
+        if not skip_preview:
+            def _synth():
+                try:
+                    wav = synthesize_simple(PREVIEW_TEXT, style_id, self.base_url)
+                    threading.Thread(target=_play_wav_bytes, args=(wav,), daemon=True).start()
+                    self.after(0, lambda: self._status.config(text=""))
+                except Exception as e:
+                    msg = str(e)
+                    self.after(0, lambda: self._on_preview_error(msg))
 
-        threading.Thread(target=_synth, daemon=True).start()
+            threading.Thread(target=_synth, daemon=True).start()
         # 异步加载该风格专属全身照做背景（同角色不同风格照片不同）
         def _fetch():
             portrait, is_url = "", False
@@ -346,6 +389,31 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
     def _on_preview_error(self, msg: str) -> None:
         self._status.config(text="")
         messagebox.showerror("试听失败", msg)
+
+    def _copy_tts_cmd(self) -> None:
+        """复制当前选中音色的 TTS 命令到剪贴板"""
+        sel = self.tree.selection()
+        if not sel or sel[0] not in self.voice_map:
+            messagebox.showinfo("复制", "请先选择音色")
+            return
+        style_id, _, _ = self.voice_map[sel[0]]
+        cmd = f"\\tts{{こんにちは}}{{ja}}{{{style_id}}}"
+        self.clipboard_clear()
+        self.clipboard_append(cmd)
+        self._status.config(text=f"已复制: {cmd}")
+
+    def _copy_lyrics_cmd(self) -> None:
+        """复制当前选中音色的 歌词命令到剪贴板"""
+        sel = self.tree.selection()
+        if not sel or sel[0] not in self.voice_map:
+            messagebox.showinfo("复制", "请先选择音色")
+            return
+        style_id, _, _ = self.voice_map[sel[0]]
+        # \lyrics{字/字}{part_index}{voice_id}{melody}  melody: 0=第一音旋律 1=第二音旋律
+        cmd = f"\\lyrics{{字/字}}{{0}}{{{style_id}}}{{0}}"
+        self.clipboard_clear()
+        self.clipboard_append(cmd)
+        self._status.config(text=f"已复制: {cmd}")
 
 
 def show_voicevox_dialog(parent: tk.Tk, base_url: str = VOICEVOX_BASE) -> None:

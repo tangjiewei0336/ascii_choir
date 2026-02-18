@@ -189,10 +189,10 @@
 使用\no_bar_check即可禁用小节号，同时beat也无效。
 
 ### TTS 语音（篇章间）
-`\tts{文本}` 或 `\tts{文本}{语言}` 用于在篇章之间插入语音朗读，**仅可插入在篇章之间**（双换行分隔的块）。
+`\tts{文本}`、`\tts{文本}{语言}` 或 `\tts{文本}{语言}{voice_id}` 用于在篇章之间插入语音朗读，**仅可插入在篇章之间**（双换行分隔的块）。
 - 支持语言：`zh` 中文、`ja` 日语、`en` 英语（默认）
-- 需安装 `edge-tts`，播放时需网络
-- 音频解码：优先用 `audioread`（macOS 可用系统 Core Audio，无需 ffmpeg）；否则需 `pydub` + `ffmpeg`（macOS: `brew install ffmpeg`）
+- **voice_id**（可选）：VOICEVOX 的 style_id。若填写，则用 VOICEVOX 合成，不再使用 edge-tts；需先启动 voicevox_engine（默认 http://127.0.0.1:50021），可在 TTS 菜单 → VOICEVOX 音色选择 中查看并复制命令
+- 未填 voice_id 时：需安装 `edge-tts`，播放时需网络；音频解码优先用 `audioread`，否则需 `pydub` + `ffmpeg`
 
 有效的例子：
 ```text
@@ -208,12 +208,16 @@
 
 \tts{Verse two}{en}
 
+\tts{こんにちは}{ja}{1}
+
 |1 2 3 4|5 6 7 1|
 ```
 
 ### 歌词（\lyrics、行内）
 `\lyrics{字1/字2/字3}` 将斜杠分隔的每个字与一个音符对齐（连音线视为一个音符）。溢出自动添加到下一行第一个未对齐的音符。
-- `\lyrics{...}{part_index}` 可指定追加到第几个声部（0 起）
+- `\lyrics{...}{part_index}`：**声部索引**，指定歌词追加到第几个声部（0 起）。多声部时，0=第一行旋律，1=第二行旋律，以此类推
+- `\lyrics{...}{part_index}{voice_id}`：voice_id 为 VOICEVOX style_id（可选）
+- `\lyrics{...}{part_index}{voice_id}{melody}`：**melody** 为和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
 - 行内歌词：`1(啊) 2(一)` 在音符后加括号
 
 ```text
@@ -222,6 +226,14 @@
 \lyrics{do/re/mi/fa}
 
 |1 2 3 4|5 6 7 1|
+```
+
+多声部示例：
+```text
+\lyrics{啊/呀/哦}{0}
+\lyrics{啦/啦/啦}{1}
+& 1 2 3 | 4 5 6
+& 7 8 9 | 1 2 3
 ```
 
 ### 导入文件（\import）
@@ -242,6 +254,16 @@
 
 \import{副歌.choir}
 ```
+
+## VOICEVOX 音色选择
+
+TTS 菜单 → **VOICEVOX 音色选择** 可打开音色对话框：
+- 左侧：扁平音色列表，**点击即试听**
+- 右侧：选中音色的全身照与利用規約
+- **复制 TTS 命令**：将 `\tts{こんにちは}{ja}{style_id}` 复制到剪贴板
+- **复制 歌词命令**：将 `\lyrics{字/字}{0}{style_id}{0}` 复制到剪贴板
+
+使用前需启动 voicevox_engine（默认 http://127.0.0.1:50021）。
 
 ## 编辑器功能
 

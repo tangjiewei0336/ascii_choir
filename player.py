@@ -115,7 +115,8 @@ class Player:
             for tts in seg.tts_before:
                 if self._stop_requested:
                     break
-                tts_result = generate_tts_audio(tts.text, tts.lang, self.sample_rate)
+                voice_id = getattr(tts, "voice_id", None)
+                tts_result = generate_tts_audio(tts.text, tts.lang, self.sample_rate, voice_id=voice_id)
                 if tts_result:
                     tts_audio, tts_dur = tts_result
                     audio_parts.append(tts_audio)
