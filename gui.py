@@ -17,6 +17,27 @@ from renderer import render_to_image, render_to_pil
 from validator import validate
 
 
+def show_error_detail(parent: tk.Tk, title: str, message: str, traceback_str: str | None = None) -> None:
+    """展示详细错误信息，含堆栈或较长时用可滚动对话框"""
+    full = message
+    if traceback_str:
+        full = f"{message}\n\n--- 详细堆栈 ---\n{traceback_str}"
+    if not traceback_str and len(message) < 200 and message.count("\n") < 2:
+        messagebox.showerror(title, message, parent=parent)
+        return
+    dlg = tk.Toplevel(parent)
+    dlg.title(title)
+    dlg.transient(parent)
+    dlg.geometry("520x360")
+    ttk.Label(dlg, text=message.split("\n")[0][:80] + ("..." if len(message.split("\n")[0]) > 80 else ""), wraplength=480).pack(anchor=tk.W, padx=10, pady=(10, 5))
+    txt = scrolledtext.ScrolledText(dlg, wrap=tk.WORD, font=("Consolas", 10), height=14, width=60)
+    txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+    txt.insert(tk.END, full)
+    txt.config(state=tk.DISABLED)
+    ttk.Button(dlg, text="关闭", command=dlg.destroy).pack(pady=(0, 10))
+    dlg.geometry(f"+{parent.winfo_rootx() + 80}+{parent.winfo_rooty() + 120}")
+
+
 def _ask_rename(prompt: str, initial: str, parent: tk.Tk) -> str | None:
     """重命名对话框：只选中文件名部分，不选中后缀"""
     result: list[str | None] = [None]
@@ -309,8 +330,10 @@ class App:
         self._do_highlights()
     
     def _on_open(self):
+        initialdir = str(self.current_file_path.parent) if self.current_file_path else None
         path = filedialog.askopenfilename(
             title="打开简谱文件",
+            initialdir=initialdir,
             filetypes=[("简谱文件", "*.choir *.txt"), ("所有文件", "*.*")],
         )
         if path:
@@ -323,8 +346,12 @@ class App:
             self._on_save_as()
     
     def _on_save_as(self):
+        initialdir = str(self.current_file_path.parent) if self.current_file_path else None
+        initialfile = self.current_file_path.name if self.current_file_path else None
         path = filedialog.asksaveasfilename(
             title="另存为",
+            initialdir=initialdir,
+            initialfile=initialfile,
             defaultextension=".choir",
             filetypes=[("简谱文件", "*.choir *.txt"), ("所有文件", "*.*")],
         )
@@ -345,15 +372,21 @@ class App:
         try:
             content = expand_imports(content, base_dir)
         except (FileNotFoundError, ValueError, OSError) as e:
-            messagebox.showerror("导入错误", str(e))
+            import traceback
+            show_error_detail(self.root, "导入错误", str(e), traceback.format_exc())
             return
         try:
             score = parse(content)
         except Exception as e:
-            messagebox.showerror("解析错误", str(e))
+            import traceback
+            show_error_detail(self.root, "解析错误", str(e), traceback.format_exc())
             return
+        initialdir = str(self.current_file_path.parent) if self.current_file_path else None
+        initialfile = (self.current_file_path.stem + ".jpg") if self.current_file_path else None
         path = filedialog.asksaveasfilename(
             title="导出带歌词简谱",
+            initialdir=initialdir,
+            initialfile=initialfile,
             defaultextension=".jpg",
             filetypes=[("JPEG 图片", "*.jpg *.jpeg"), ("所有文件", "*.*")],
         )
@@ -367,9 +400,11 @@ class App:
             out = render_to_image(score, path, layout=layout)
             messagebox.showinfo("导出成功", f"已保存到 {out}")
         except ImportError as e:
-            messagebox.showerror("导出失败", "请安装 Pillow: pip install Pillow")
+            import traceback
+            show_error_detail(self.root, "导出失败", "请安装 Pillow: pip install Pillow", traceback.format_exc())
         except Exception as e:
-            messagebox.showerror("导出失败", str(e))
+            import traceback
+            show_error_detail(self.root, "导出失败", str(e), traceback.format_exc())
 
     def _on_format(self):
         """格式化：对齐小节号"""
@@ -384,12 +419,15 @@ class App:
         self.root.after(2000, lambda: self.status_label.config(text="就绪"))
 
     def _on_voicevox_voices(self):
-        """打开 VOICEVOX 音色选择对话框（音色列表 + 利用規約 + 试听）"""
+        """打开 VOICEVOX 音色选择对话框（音色列表 + 利用規約 + 试听 + 清唱生成）"""
         try:
             from voicevox_voice_dialog import show_voicevox_dialog
-            show_voicevox_dialog(self.root)
+            get_score = lambda: self.text.get(1.0, tk.END)
+            get_current_file = lambda: self.current_file_path
+            show_voicevox_dialog(self.root, get_score_callback=get_score, get_current_file_callback=get_current_file)
         except ImportError as e:
-            messagebox.showerror("错误", f"无法加载 VOICEVOX 模块: {e}")
+            import traceback
+            show_error_detail(self.root, "错误", f"无法加载 VOICEVOX 模块: {e}", traceback.format_exc())
     
     def _on_open_workspace(self):
         default_dir = WORKSPACES_DIR
@@ -414,7 +452,8 @@ class App:
             self._highlight_current_file_in_workspace()
             self.root.after(100, self._update_preview)
         except Exception as e:
-            messagebox.showerror("打开失败", str(e))
+            import traceback
+            show_error_detail(self.root, "打开失败", str(e), traceback.format_exc())
     
     def _save_to(self, path: Path, silent: bool = False):
         try:
@@ -428,7 +467,8 @@ class App:
             if self.workspace_root and path.parent == self.workspace_root:
                 self._refresh_workspace_list()
         except Exception as e:
-            messagebox.showerror("保存失败", str(e))
+            import traceback
+            show_error_detail(self.root, "保存失败", str(e), traceback.format_exc())
     
     def _set_workspace(self, path: Path):
         self.workspace_root = path
@@ -558,7 +598,7 @@ class App:
         if new_path == old_path:
             return
         if new_path.exists():
-            messagebox.showerror("重命名失败", f"文件已存在：{new_name}")
+            show_error_detail(self.root, "重命名失败", f"文件已存在：{new_name}")
             return
         try:
             old_path.rename(new_path)
@@ -569,7 +609,8 @@ class App:
             self.status_label.config(text="已重命名")
             self.root.after(2000, lambda: self.status_label.config(text="就绪"))
         except Exception as e:
-            messagebox.showerror("重命名失败", str(e))
+            import traceback
+            show_error_detail(self.root, "重命名失败", str(e), traceback.format_exc())
 
     def _on_workspace_delete(self, idx: int):
         """删除工作区文件"""
@@ -589,7 +630,8 @@ class App:
             self.status_label.config(text="已删除")
             self.root.after(2000, lambda: self.status_label.config(text="就绪"))
         except Exception as e:
-            messagebox.showerror("删除失败", str(e))
+            import traceback
+            show_error_detail(self.root, "删除失败", str(e), traceback.format_exc())
     
     def _build_ui(self):
         colors = self._theme_colors()
@@ -1227,7 +1269,8 @@ class App:
         try:
             score = expand_imports(score, base_dir)
         except (FileNotFoundError, ValueError, OSError) as e:
-            messagebox.showerror("导入错误", str(e))
+            import traceback
+            show_error_detail(self.root, "导入错误", str(e), traceback.format_exc())
             return
 
         self.is_playing = True
@@ -1247,7 +1290,9 @@ class App:
             try:
                 self.player.play_score(score)
             except Exception as e:
-                self.root.after(0, lambda err=e: messagebox.showerror("播放错误", str(err)))
+                import traceback
+                tb = traceback.format_exc()
+                self.root.after(0, lambda: show_error_detail(self.root, "播放错误", str(e), tb))
             finally:
                 self.root.after(0, self._on_play_finished)
         

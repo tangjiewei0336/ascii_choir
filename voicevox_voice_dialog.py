@@ -9,11 +9,13 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from voicevox_client import (
     fetch_speakers,
     fetch_speaker_info,
+    fetch_singers,
+    clear_singers_cache,
     synthesize_simple,
     get_legal_info_for_speaker,
     VOICEVOX_BASE,
@@ -157,9 +159,17 @@ def _play_wav_bytes(wav_bytes: bytes) -> None:
 class VoiceVoxVoiceDialog(tk.Toplevel):
     """VOICEVOX 音色选择与试听对话框"""
 
-    def __init__(self, parent: tk.Tk, base_url: str = VOICEVOX_BASE):
+    def __init__(
+        self,
+        parent: tk.Tk,
+        base_url: str = VOICEVOX_BASE,
+        get_score_callback: Optional[Callable[[], str]] = None,
+        get_current_file_callback: Optional[Callable[[], "Path | None"]] = None,
+    ):
         super().__init__(parent)
         self.base_url = base_url
+        self.get_score_callback = get_score_callback
+        self.get_current_file_callback = get_current_file_callback
         self.title("VOICEVOX 音色选择")
         self.geometry("1050x820")
         self.transient(parent)
@@ -185,11 +195,13 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         paned.add(left_frame, weight=1)
         _style = ttk.Style()
         _style.configure("Treeview", rowheight=44)
-        self.tree = ttk.Treeview(left_frame, height=14, show="tree headings", columns=("name",), selectmode="browse")
+        self.tree = ttk.Treeview(left_frame, height=14, show="tree headings", columns=("name", "sing"), selectmode="browse")
         self.tree.heading("#0", text="")
         self.tree.heading("name", text="角色 - 风格")
+        self.tree.heading("sing", text="唱歌")
         self.tree.column("#0", width=50, minwidth=50)
-        self.tree.column("name", width=180, minwidth=120)
+        self.tree.column("name", width=160, minwidth=100)
+        self.tree.column("sing", width=44, minwidth=44)
         scroll_l = ttk.Scrollbar(left_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll_l.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -212,6 +224,8 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         btn_frame.pack(fill=tk.X, pady=(10, 0))
         ttk.Button(btn_frame, text="复制 TTS 命令", command=self._copy_tts_cmd).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(btn_frame, text="复制 歌词命令", command=self._copy_lyrics_cmd).pack(side=tk.LEFT, padx=(0, 5))
+        if get_score_callback:
+            ttk.Button(btn_frame, text="清唱生成", command=self._on_acappella).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(btn_frame, text="刷新列表", command=self._load_speakers).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="关闭", command=self.destroy).pack(side=tk.RIGHT)
 
@@ -224,22 +238,35 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         """从 API 加载音色列表"""
         self._status.config(text="正在连接 VOICEVOX 引擎...")
         self.update_idletasks()
+        clear_singers_cache()
 
         def _fetch():
             try:
-                data = fetch_speakers(self.base_url)
-                self.after(0, lambda: self._apply_speakers(data))
+                speakers_data = fetch_speakers(self.base_url)
+                singers_data = fetch_singers(self.base_url)
+                self.after(0, lambda: self._apply_speakers(speakers_data, singers_data))
             except Exception as e:
-                msg = str(e)
-                self.after(0, lambda: self._on_error(msg))
+                import traceback
+                self.after(0, lambda: self._on_error(str(e), traceback.format_exc()))
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _apply_speakers(self, data: list[dict]) -> None:
+    def _apply_speakers(self, data: list[dict], singers: list[dict] | None = None) -> None:
         self.speakers_data = data
         self.voice_map = {}
         self._icon_photos.clear()
         self.tree.delete(*self.tree.get_children())
+        # /singers 与 /speakers 角色集不同，style_id 可能不重叠。用 speaker_uuid 匹配：若角色在 singers 中则支持歌唱
+        singing_uuids: set[str] = set()
+        singing_ids: set[int] = set()
+        for s in singers or []:
+            u = s.get("speaker_uuid") or s.get("uuid")
+            if u:
+                singing_uuids.add(str(u))
+            for st in s.get("styles", []):
+                sid = st.get("id")
+                if sid is not None:
+                    singing_ids.add(sid)
         total = 0
         for sp in data:
             name = sp.get("name", "?")
@@ -248,10 +275,16 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                 sid = st.get("id", 0)
                 sname = st.get("name", "通常")
                 label = f"{name} - {sname}"
-                item = self.tree.insert("", tk.END, text="", values=(label,))
+                can_sing = sid in singing_ids or (uuid and str(uuid) in singing_uuids)
+                sing_label = "是" if can_sing else "否"
+                item = self.tree.insert("", tk.END, text="", values=(label, sing_label))
                 self.voice_map[item] = (sid, name, uuid)
                 total += 1
-        self._status.config(text=f"已加载 {total} 个音色，正在加载头像...")
+        status_text = f"已加载 {total} 个音色"
+        if not (singers or []) or (not singing_uuids and not singing_ids):
+            status_text += "（未检测到歌唱角色，请安装波音リツ等歌唱音声库）"
+        status_text += "，正在加载头像..."
+        self._status.config(text=status_text)
         last_style = _load_last_style_id()
         threading.Thread(target=self._load_all_icons, daemon=True).start()
         # 恢复上次选择的音色（仅展示，不自动试听）
@@ -304,9 +337,13 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                 pass
         self.after(0, lambda: self._status.config(text=f"已加载 {len(self.voice_map)} 个音色"))
 
-    def _on_error(self, msg: str) -> None:
+    def _on_error(self, msg: str, tb: str = "") -> None:
         self._status.config(text="")
-        messagebox.showerror("VOICEVOX 连接失败", msg)
+        try:
+            from gui import show_error_detail
+            show_error_detail(self, "VOICEVOX 连接失败", msg, tb if tb else None)
+        except ImportError:
+            messagebox.showerror("VOICEVOX 连接失败", msg + (f"\n\n{tb}" if tb else ""))
         self._status.config(text="连接失败，请确保 voicevox_engine 已启动 (http://localhost:50021)")
 
     def _on_select(self, event=None, skip_preview: bool = False) -> None:
@@ -340,8 +377,8 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                     threading.Thread(target=_play_wav_bytes, args=(wav,), daemon=True).start()
                     self.after(0, lambda: self._status.config(text=""))
                 except Exception as e:
-                    msg = str(e)
-                    self.after(0, lambda: self._on_preview_error(msg))
+                    import traceback
+                    self.after(0, lambda: self._on_preview_error(str(e), traceback.format_exc()))
 
             threading.Thread(target=_synth, daemon=True).start()
         # 异步加载该风格专属全身照做背景（同角色不同风格照片不同）
@@ -386,9 +423,13 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
             self._right_canvas.create_image(cw // 2, ch // 2, anchor=tk.CENTER, image=photo, tags="bg")
             self._right_canvas.lower("bg")
 
-    def _on_preview_error(self, msg: str) -> None:
+    def _on_preview_error(self, msg: str, tb: str = "") -> None:
         self._status.config(text="")
-        messagebox.showerror("试听失败", msg)
+        try:
+            from gui import show_error_detail
+            show_error_detail(self, "试听失败", msg, tb if tb else None)
+        except ImportError:
+            messagebox.showerror("试听失败", msg + (f"\n\n{tb}" if tb else ""))
 
     def _copy_tts_cmd(self) -> None:
         """复制当前选中音色的 TTS 命令到剪贴板"""
@@ -415,8 +456,61 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         self.clipboard_append(cmd)
         self._status.config(text=f"已复制: {cmd}")
 
+    def _on_acappella(self) -> None:
+        """清唱生成：用当前选中音色合成简谱歌声（无伴奏），直接播放"""
+        if not self.get_score_callback:
+            return
+        score_text = self.get_score_callback()
+        if not score_text or not score_text.strip():
+            messagebox.showwarning("清唱生成", "请先在编辑器中输入带 \\lyrics 的简谱")
+            return
+        sel = self.tree.selection()
+        voice_id = None
+        if sel and sel[0] in self.voice_map:
+            voice_id, _, _ = self.voice_map[sel[0]]
+        self._status.config(text="正在生成清唱...")
+        self.update_idletasks()
 
-def show_voicevox_dialog(parent: tk.Tk, base_url: str = VOICEVOX_BASE) -> None:
-    """显示 VOICEVOX 音色选择对话框"""
-    dlg = VoiceVoxVoiceDialog(parent, base_url)
+        def _do():
+            try:
+                import traceback
+                import soundfile as sf
+                from lyrics_synth import synthesize_acappella
+                result = synthesize_acappella(
+                    score_text, sample_rate=44100, voice_id_override=voice_id, base_url=self.base_url
+                )
+                if not result:
+                    self.after(0, lambda: self._acappella_done("无带歌词的篇章或合成失败", None))
+                    return
+                audio, _ = result
+                buf = io.BytesIO()
+                sf.write(buf, audio, 44100, format="WAV")
+                wav_bytes = buf.getvalue()
+                self._status.config(text="")
+                threading.Thread(target=_play_wav_bytes, args=(wav_bytes,), daemon=True).start()
+            except Exception as e:
+                import traceback
+                self.after(0, lambda err=str(e), tb=traceback.format_exc(): self._acappella_done(err, tb))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _acappella_done(self, err: str, tb: str | None = None) -> None:
+        """清唱生成失败时显示错误"""
+        self._status.config(text="")
+        if err:
+            try:
+                from gui import show_error_detail
+                show_error_detail(self, "清唱生成失败", err, tb)
+            except ImportError:
+                messagebox.showerror("清唱生成失败", err + (f"\n\n{tb}" if tb else ""))
+
+
+def show_voicevox_dialog(
+    parent: tk.Tk,
+    base_url: str = VOICEVOX_BASE,
+    get_score_callback: Optional[Callable[[], str]] = None,
+    get_current_file_callback: Optional[Callable[[], "Path | None"]] = None,
+) -> None:
+    """显示 VOICEVOX 音色选择对话框。get_score_callback 用于清唱生成时获取当前简谱"""
+    dlg = VoiceVoxVoiceDialog(parent, base_url, get_score_callback, get_current_file_callback)
     dlg.wait_window()

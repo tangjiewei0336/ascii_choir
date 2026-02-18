@@ -17,6 +17,15 @@ except ImportError:
     def generate_tts_audio(*args, **kwargs):
         return None
 
+try:
+    from lyrics_synth import synthesize_lyrics, has_lyrics_voice
+except ImportError:
+    def synthesize_lyrics(*args, **kwargs):
+        return None
+
+    def has_lyrics_voice(*args, **kwargs):
+        return False
+
 
 class Player:
     def __init__(self, sound_library_path: Optional[str] = None):
@@ -125,11 +134,31 @@ class Player:
             if self._stop_requested:
                 break
 
-            # 音符
+            # 音符：有 \\lyrics{...}{voice_id} 时用 VOICEVOX 歌唱合成，否则用 WAV
             if seg.notes:
-                seg_audio, seg_dur = self._render_notes(seg.notes)
-                audio_parts.append(seg_audio)
-                total_duration += seg_dur
+                seg_dur = max(n.start_time + n.duration for n in seg.notes)
+                if has_lyrics_voice(parsed, seg.section_index):
+                    sing_result = synthesize_lyrics(
+                        parsed, seg.section_index, self.sample_rate, max_duration_seconds=seg_dur
+                    )
+                    if sing_result:
+                        seg_audio, _ = sing_result
+                        # 若歌声短于段落，末尾补静音
+                        target_len = int(seg_dur * self.sample_rate) + 1
+                        if len(seg_audio) < target_len:
+                            seg_audio = np.pad(seg_audio, (0, target_len - len(seg_audio)), mode="constant")
+                        elif len(seg_audio) > target_len:
+                            seg_audio = seg_audio[:target_len]
+                        audio_parts.append(seg_audio)
+                        total_duration += seg_dur
+                    else:
+                        seg_audio, seg_dur = self._render_notes(seg.notes)
+                        audio_parts.append(seg_audio)
+                        total_duration += seg_dur
+                else:
+                    seg_audio, seg_dur = self._render_notes(seg.notes)
+                    audio_parts.append(seg_audio)
+                    total_duration += seg_dur
 
         if not audio_parts:
             return 0.0

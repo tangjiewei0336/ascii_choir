@@ -10,6 +10,7 @@ class ScheduledSegment:
     """调度后的篇章：该篇章前的 TTS + 音符列表（notes 的 start_time 相对于本篇章开始）"""
     tts_before: list[TTSEvent]
     notes: list["ScheduledNote"]
+    section_index: int = 0  # 对应 score.section_lyrics 的索引
 
 
 @dataclass
@@ -19,6 +20,7 @@ class ScheduledNote:
     duration: float
     midis: list[int]
     volume: float = 0.6
+    part_index: int = 0  # 声部索引，用于歌词合成时筛选旋律
 
 
 def _merge_tied_events(
@@ -84,6 +86,7 @@ def _part_events_to_scheduled(
     part_bars: list[BarContent],
     bar_starts: list[float],
     beats_per_second: float,
+    part_index: int = 0,
 ) -> list[ScheduledNote]:
     """将一声部的所有小节事件转为 ScheduledNote，跨小节连音已合并"""
     events_with_start: list[tuple[float, NoteEvent | ChordEvent | RestEvent]] = []
@@ -106,6 +109,7 @@ def _part_events_to_scheduled(
             duration=dur / beats_per_second,
             midis=midis,
             volume=vol,
+            part_index=part_index,
         )
         for start, dur, midis, vol in merged
     ]
@@ -199,7 +203,7 @@ def _collect_notes_from_aligned(
     for part_idx in range(num_parts):
         part_bars = [row[part_idx] for row in bars_to_process]
         part_notes = _part_events_to_scheduled(
-            part_bars, bar_starts[:-1], beats_per_second
+            part_bars, bar_starts[:-1], beats_per_second, part_index=part_idx
         )
         notes.extend(part_notes)
     return notes, global_beat, hit_fine, hit_dc
@@ -217,6 +221,7 @@ def schedule(score: ParsedScore) -> list[ScheduledNote]:
                 duration=n.duration,
                 midis=n.midis,
                 volume=n.volume,
+                part_index=n.part_index,
             ))
         if seg.notes:
             t_offset += max(n.start_time + n.duration for n in seg.notes)
@@ -257,10 +262,10 @@ def schedule_segments(score: ParsedScore) -> list[ScheduledSegment]:
         # 音符的 start_time 转为相对于本篇章开始（0）
         seg_start = global_beat / beats_per_second
         rel_notes = [
-            ScheduledNote(n.start_time - seg_start, n.duration, n.midis, n.volume)
+            ScheduledNote(n.start_time - seg_start, n.duration, n.midis, n.volume, n.part_index)
             for n in notes1
         ]
-        segments.append(ScheduledSegment(tts_before=tts_before, notes=rel_notes))
+        segments.append(ScheduledSegment(tts_before=tts_before, notes=rel_notes, section_index=sec_idx))
         global_beat = next_beat
 
         if hit_dc:
@@ -281,8 +286,8 @@ def schedule_segments(score: ParsedScore) -> list[ScheduledSegment]:
                     aligned, dc_beat, bps, def_beats, stop_at_fine=True
                 )
                 seg_s = dc_beat / bps
-                rel = [ScheduledNote(n.start_time - seg_s, n.duration, n.midis, n.volume) for n in nd]
-                dc_segments.append(ScheduledSegment(tts_before=tts, notes=rel))
+                rel = [ScheduledNote(n.start_time - seg_s, n.duration, n.midis, n.volume, n.part_index) for n in nd]
+                dc_segments.append(ScheduledSegment(tts_before=tts, notes=rel, section_index=s_idx))
                 dc_beat = next_b
                 if hit_f:
                     break

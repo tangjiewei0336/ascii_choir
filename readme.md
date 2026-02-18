@@ -1,3 +1,13 @@
+# 简谱演奏
+
+如果需要使用VOCALOID功能，请在启动了docker的命令行运行：
+
+**Docker 启动**：
+```bash
+docker pull voicevox/voicevox_engine:cpu-latest
+docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
+```
+
 ## 记号介绍
 
 #### 1. `[]` 表示奏法记号或简谱格式记号，目前支持如下记号（同组记号之间互斥）：
@@ -216,7 +226,7 @@
 ### 歌词（\lyrics、行内）
 `\lyrics{字1/字2/字3}` 将斜杠分隔的每个字与一个音符对齐（连音线视为一个音符）。溢出自动添加到下一行第一个未对齐的音符。
 - `\lyrics{...}{part_index}`：**声部索引**，指定歌词追加到第几个声部（0 起）。多声部时，0=第一行旋律，1=第二行旋律，以此类推
-- `\lyrics{...}{part_index}{voice_id}`：voice_id 为 VOICEVOX style_id（可选）
+- `\lyrics{...}{part_index}{voice_id}`：voice_id 为 VOICEVOX style_id（可选）。**有 voice_id 时播放会用 VOICEVOX 歌唱合成歌声**，替代 WAV 音色
 - `\lyrics{...}{part_index}{voice_id}{melody}`：**melody** 为和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
 - 行内歌词：`1(啊) 2(一)` 在音符后加括号
 
@@ -262,8 +272,11 @@ TTS 菜单 → **VOICEVOX 音色选择** 可打开音色对话框：
 - 右侧：选中音色的全身照与利用規約
 - **复制 TTS 命令**：将 `\tts{こんにちは}{ja}{style_id}` 复制到剪贴板
 - **复制 歌词命令**：将 `\lyrics{字/字}{0}{style_id}{0}` 复制到剪贴板
+- **清唱生成**：用当前选中音色将当前编辑器中的简谱合成为歌声（无 WAV 伴奏），直接播放
 
 使用前需启动 voicevox_engine（默认 http://127.0.0.1:50021）。
+
+**歌词歌声合成**：当 `\lyrics{...}{part}{voice_id}{melody}` 中指定了 voice_id 时，播放该篇章会用 VOICEVOX 歌唱 API 合成歌声。**注意**：歌唱仅支持 `/singers` 中的角色（如波音リツ），若所选音色不支持歌唱，程序会自动使用可用的歌唱角色。
 
 ## 编辑器功能
 

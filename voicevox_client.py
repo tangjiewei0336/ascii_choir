@@ -39,6 +39,13 @@ https://zunko.jp/con_ongen_kiyaku.html""",
 
 def _request(method: str, url: str, data: Optional[bytes] = None, headers: Optional[dict] = None) -> tuple[int, bytes]:
     """发送 HTTP 请求，返回 (status_code, body)"""
+    if data:
+        try:
+            body_str = data.decode("utf-8", errors="replace")
+            if body_str.strip().startswith(("{", "[")):
+                print(f"[VOICEVOX] {method} {url}\n[VOICEVOX] 请求 JSON:\n{body_str}")
+        except Exception:
+            pass
     req = urllib.request.Request(url, data=data, method=method)
     if headers:
         for k, v in headers.items():
@@ -60,6 +67,8 @@ def _format_error(status: int, body: bytes, endpoint: str) -> str:
     msg = f"VOICEVOX {endpoint} 返回 {status}: {body_str}"
     if status == 502:
         msg += "\n\n502 常见原因：引擎未启动、已崩溃或代理异常。请确认 voicevox_engine 已运行，可访问 http://127.0.0.1:50021/docs 测试。"
+    elif status == 500 and "sing" in endpoint.lower():
+        msg += "\n\n歌唱 API 500：所选音色可能不支持歌唱。仅 /singers 中的角色（如波音リツ）支持歌唱，程序会自动尝试使用歌唱角色。"
     elif status in (0, -1) or "Connection" in body_str:
         msg += "\n\n请确认 voicevox_engine 已启动 (默认端口 50021)。"
     return msg
@@ -124,6 +133,142 @@ def synthesize_simple(text: str, speaker_id: int, base_url: str = VOICEVOX_BASE)
     """
     q = audio_query(text, speaker_id, base_url)
     return synthesis(q, speaker_id, base_url)
+
+
+# VOICEVOX 歌唱 API：frame_rate 通常为 93.75
+SING_FRAME_RATE = 93.75
+# sing_frame_audio_query 固定使用 6000，frame_synthesis 使用 /singers 中的 style_id
+SING_FRAME_QUERY_SPEAKER = 6000
+
+
+def sing_frame_audio_query(
+    notes: list[dict],
+    base_url: str = VOICEVOX_BASE,
+) -> dict:
+    """
+    歌唱用帧级查询。speaker 固定为 6000，仅生成查询结构。
+    notes: [{"id": str, "key": int, "frame_length": int, "lyric": str}, ...]
+      - key: MIDI 音高
+      - frame_length: 帧数 (duration_sec * frame_rate)
+      - lyric: 歌词，如 "あ"、"か"
+    """
+    url = f"{base_url}/sing_frame_audio_query?speaker={SING_FRAME_QUERY_SPEAKER}"
+    data = json.dumps({"notes": notes}, ensure_ascii=False).encode("utf-8")
+    status, body = _request("POST", url, data=data)
+    if status != 200:
+        raise RuntimeError(_format_error(status, body, "/sing_frame_audio_query"))
+    return json.loads(body.decode("utf-8"))
+
+
+def frame_synthesis(
+    frame_audio_query: dict,
+    speaker_id: int,
+    base_url: str = VOICEVOX_BASE,
+) -> bytes:
+    """
+    根据 FrameAudioQuery 合成歌唱 WAV 字节。
+    speaker_id 必须使用 /singers 中的 style_id。
+    """
+    url = f"{base_url}/frame_synthesis?speaker={speaker_id}"
+    data = json.dumps(frame_audio_query, ensure_ascii=False).encode("utf-8")
+    status, body = _request("POST", url, data=data)
+    if status != 200:
+        raise RuntimeError(_format_error(status, body, "/frame_synthesis"))
+    return body
+
+
+_singers_cache: list[dict] | None = None
+
+
+def clear_singers_cache() -> None:
+    """刷新时清空歌唱角色缓存"""
+    global _singers_cache
+    _singers_cache = None
+
+
+def fetch_singers(base_url: str = VOICEVOX_BASE) -> list[dict]:
+    """
+    获取歌唱用角色列表（/singers）。
+    歌唱 API 需使用此列表中的 style_id，普通 /speakers 的 style 可能不支持歌唱。
+    """
+    global _singers_cache
+    if _singers_cache is not None:
+        return _singers_cache
+    try:
+        status, body = _request("GET", f"{base_url}/singers")
+        if status != 200:
+            _singers_cache = []
+            return _singers_cache
+        _singers_cache = json.loads(body.decode("utf-8")) or []
+    except Exception:
+        _singers_cache = []
+    return _singers_cache
+
+
+def get_singing_style_id(base_url: str = VOICEVOX_BASE) -> Optional[int]:
+    """
+    获取第一个可用的歌唱用 style_id。若无歌唱角色则返回 None。
+    """
+    try:
+        singers = fetch_singers(base_url)
+        for s in singers:
+            for st in s.get("styles", []):
+                return st.get("id")
+    except Exception:
+        pass
+    return None
+
+
+def is_singing_style(style_id: int, base_url: str = VOICEVOX_BASE) -> bool:
+    """检查 style_id 是否支持歌唱（在 /singers 列表中）"""
+    try:
+        singers = fetch_singers(base_url)
+        for s in singers:
+            for st in s.get("styles", []):
+                if st.get("id") == style_id:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def resolve_singing_style_id(
+    style_id: int,
+    base_url: str = VOICEVOX_BASE,
+) -> Optional[int]:
+    """
+    将 /speakers 的 style_id 解析为歌唱 API 可用的 style_id。
+    /singers 与 /speakers 的 style_id 可能不同（同一角色有说话用与歌唱用两种 ID），
+    歌唱 API 必须使用 /singers 中的 style_id，否则会报「スタイルが見つかりませんでした」。
+    若 style_id 已在 /singers 中则直接返回；否则按 speaker_uuid 匹配同角色的歌唱 style_id。
+    """
+    if is_singing_style(style_id, base_url):
+        return style_id
+    try:
+        speakers = fetch_speakers(base_url)
+        target_uuid: Optional[str] = None
+        for sp in speakers:
+            for st in sp.get("styles", []):
+                if st.get("id") == style_id:
+                    target_uuid = sp.get("speaker_uuid") or sp.get("uuid")
+                    break
+            if target_uuid:
+                break
+        if not target_uuid:
+            return get_singing_style_id(base_url)
+        singers = fetch_singers(base_url)
+        target_uuid_str = str(target_uuid)
+        for s in singers:
+            u = s.get("speaker_uuid") or s.get("uuid")
+            if u and str(u) == target_uuid_str:
+                for st in s.get("styles", []):
+                    sid = st.get("id")
+                    if sid is not None:
+                        return sid
+                break
+    except Exception:
+        pass
+    return get_singing_style_id(base_url)
 
 
 def get_legal_info_for_speaker(speaker_name: str) -> str:
