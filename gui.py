@@ -13,6 +13,7 @@ import threading
 from parser import parse
 from player import Player
 from preprocessor import expand_imports
+from renderer import render_to_image, render_to_pil
 from validator import validate
 
 
@@ -234,8 +235,8 @@ class App:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("简谱演奏 - ASCII Choir")
-        self.root.geometry("1000x600")
-        self.root.minsize(600, 400)
+        self.root.geometry("1280x720")
+        self.root.minsize(700, 500)
         
         self._dark_mode = _is_dark_mode()
         self.player = Player()
@@ -258,6 +259,7 @@ class App:
         file_menu.add_command(label="打开...", command=self._on_open, accelerator="Ctrl+O")
         file_menu.add_command(label="保存", command=self._on_save, accelerator="Ctrl+S")
         file_menu.add_command(label="另存为...", command=self._on_save_as)
+        file_menu.add_command(label="导出带歌词简谱 (JPG)...", command=self._on_export_lyrics_jpg)
         file_menu.add_separator()
         file_menu.add_command(label="打开工作区...", command=self._on_open_workspace)
         file_menu.add_command(label="打开示例工作区", command=self._on_open_example_workspace)
@@ -324,7 +326,47 @@ class App:
         )
         if path:
             self._save_to(Path(path))
-    
+
+    def _on_export_lyrics_jpg(self):
+        """导出带歌词简谱为 JPG"""
+        content = self.text.get(1.0, tk.END)
+        if not content.strip():
+            messagebox.showwarning("提示", "请输入简谱内容")
+            return
+        base_dir = (
+            self.workspace_root
+            if self.workspace_root and self.workspace_root.is_dir()
+            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+        )
+        try:
+            content = expand_imports(content, base_dir)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            messagebox.showerror("导入错误", str(e))
+            return
+        try:
+            score = parse(content)
+        except Exception as e:
+            messagebox.showerror("解析错误", str(e))
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出带歌词简谱",
+            defaultextension=".jpg",
+            filetypes=[("JPEG 图片", "*.jpg *.jpeg"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        layout = simpledialog.askstring("布局", "输入布局: vertical(上下) 或 horizontal(左右)，直接回车默认 vertical", initialvalue="vertical")
+        layout = (layout or "vertical").strip().lower() or "vertical"
+        if layout not in ("vertical", "horizontal"):
+            layout = "vertical"
+        try:
+            out = render_to_image(score, path, layout=layout)
+            messagebox.showinfo("导出成功", f"已保存到 {out}")
+        except ImportError as e:
+            messagebox.showerror("导出失败", "请安装 Pillow: pip install Pillow")
+        except Exception as e:
+            messagebox.showerror("导出失败", str(e))
+
     def _on_format(self):
         """格式化：对齐小节号"""
         self._on_align()
@@ -358,6 +400,7 @@ class App:
             self.root.title(f"简谱演奏 - {path.name}")
             self._do_highlights()
             self._highlight_current_file_in_workspace()
+            self.root.after(100, self._update_preview)
         except Exception as e:
             messagebox.showerror("打开失败", str(e))
     
@@ -648,6 +691,25 @@ class App:
         self.text.configure(xscrollcommand=hscroll.set)
         self.text.pack(fill=tk.BOTH, expand=True, pady=5)
         hscroll.pack(fill=tk.X)
+
+        # 实时预览面板（带歌词简谱）
+        self._preview_frame = ttk.LabelFrame(main, text="带歌词简谱预览", padding=5)
+        self._preview_frame.pack(fill=tk.BOTH, expand=False, pady=(5, 0))
+        self._preview_canvas = tk.Canvas(
+            self._preview_frame,
+            bg="#ffffff",
+            highlightthickness=0,
+            height=180,
+        )
+        prev_scroll_y = ttk.Scrollbar(self._preview_frame, orient=tk.VERTICAL, command=self._preview_canvas.yview)
+        prev_scroll_x = ttk.Scrollbar(self._preview_frame, orient=tk.HORIZONTAL, command=self._preview_canvas.xview)
+        self._preview_canvas.configure(yscrollcommand=prev_scroll_y.set, xscrollcommand=prev_scroll_x.set)
+        self._preview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        prev_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        prev_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self._preview_photo: tk.PhotoImage | None = None
+        self._preview_timer = None
+
         # 默认加载工作区第一个文件（已由上方 _set_workspace 设置 current_file_path）
         if self.current_file_path and self.current_file_path.exists():
             self.text.insert(tk.END, self.current_file_path.read_text(encoding="utf-8"))
@@ -660,6 +722,7 @@ class App:
                 self.text.insert(tk.END, SAMPLE_SCORE)
         self.text.bind("<Control-f>", self._on_align)
         self.root.after(100, self._do_highlights)
+        self.root.after(150, self._update_preview)
         self.text.bind("<KeyRelease>", self._on_key_release)
         self.text.bind("<ButtonRelease-1>", self._on_text_button_release)
         # 拖拽从 Listbox 到 Text 时，释放事件会发给 Listbox（鼠标被捕获），故用全局监听
@@ -704,7 +767,7 @@ class App:
         hint_bg = "#2d2d2d" if self._dark_mode else "#f0f0f0"
         self.hint = tk.Label(
             main,
-            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线(可跨小节), # b ^ 升降还原, [xxx](...) 记号, [dc][fine] 反复, \\tts{文本}{zh/ja/en} 篇章间语音, \\import{文件名} 导入 | 从工作区拖放插入 | Ctrl+F 对齐 | 括号高亮",
+            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线(可跨小节), # b ^ 升降还原, [xxx](...) 记号, [dc][fine] 反复, \\tts{文本}{zh/ja/en} 篇章间语音, \\lyrics{字/字} 或 1(啊) 行内歌词, \\import{文件名} 导入 | 文件→导出带歌词简谱(JPG) | Ctrl+F 对齐 | 括号高亮",
             font=("", 9),
             fg=colors["hint_fg"],
             bg=hint_bg,
@@ -982,6 +1045,7 @@ class App:
             self._schedule_auto_save()
             self.root.after(50, self._do_highlights)
             self.root.after(50, self._update_status_bar)
+            self._schedule_preview()
         except (tk.TclError, AttributeError):
             pass
 
@@ -1081,6 +1145,7 @@ class App:
         self._highlight_timer = self.text.after(300, self._do_highlights)
         self.root.after(50, self._update_status_bar)
         self._schedule_auto_save()
+        self._schedule_preview()
     
     def _schedule_auto_save(self):
         """延迟 1.5 秒后自动保存"""
@@ -1093,6 +1158,47 @@ class App:
         self._auto_save_timer = None
         if self.current_file_path:
             self._save_to(self.current_file_path, silent=True)
+
+    def _schedule_preview(self):
+        """延迟更新预览，避免输入时频繁渲染"""
+        if self._preview_timer:
+            self.root.after_cancel(self._preview_timer)
+        self._preview_timer = self.root.after(400, self._update_preview)
+
+    def _update_preview(self):
+        """实时渲染带歌词简谱预览"""
+        self._preview_timer = None
+        try:
+            from PIL import ImageTk
+        except ImportError:
+            return
+        content = self.text.get(1.0, tk.END)
+        if not content.strip():
+            self._preview_canvas.delete("all")
+            return
+        base_dir = (
+            self.workspace_root
+            if self.workspace_root and self.workspace_root.is_dir()
+            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+        )
+        try:
+            content = expand_imports(content, base_dir)
+        except Exception:
+            pass
+        try:
+            score = parse(content)
+        except Exception:
+            return
+        try:
+            pil_img = render_to_pil(score, layout="vertical", font_size=18)
+        except Exception:
+            return
+        w, h = pil_img.size
+        photo = ImageTk.PhotoImage(pil_img)
+        self._preview_photo = photo
+        self._preview_canvas.delete("all")
+        self._preview_canvas.config(scrollregion=(0, 0, w, h))
+        self._preview_canvas.create_image(0, 0, anchor=tk.NW, image=photo)
     
     def _on_play(self):
         if self.is_playing:
