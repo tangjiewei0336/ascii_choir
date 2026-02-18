@@ -270,6 +270,10 @@ class App:
         menubar.add_cascade(label="编辑", menu=edit_menu)
         edit_menu.add_command(label="格式化", command=self._on_format, accelerator="Ctrl+F")
         edit_menu.add_command(label="复制到剪贴板", command=self._on_copy, accelerator="Ctrl+Shift+C")
+
+        tts_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="TTS", menu=tts_menu)
+        tts_menu.add_command(label="VOICEVOX 音色选择...", command=self._on_voicevox_voices)
         
         self.root.bind("<Control-n>", lambda e: self._on_new())
         self.root.bind("<Control-o>", lambda e: self._on_open())
@@ -378,6 +382,14 @@ class App:
         self.root.update()
         self.status_label.config(text="已复制到剪贴板")
         self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+
+    def _on_voicevox_voices(self):
+        """打开 VOICEVOX 音色选择对话框（音色列表 + 利用規約 + 试听）"""
+        try:
+            from voicevox_voice_dialog import show_voicevox_dialog
+            show_voicevox_dialog(self.root)
+        except ImportError as e:
+            messagebox.showerror("错误", f"无法加载 VOICEVOX 模块: {e}")
     
     def _on_open_workspace(self):
         default_dir = WORKSPACES_DIR
