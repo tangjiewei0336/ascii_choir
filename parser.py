@@ -26,14 +26,12 @@ C_MAJOR_BASE = {1: 60, 2: 62, 3: 64, 4: 65, 5: 67, 6: 69, 7: 71}
 _PC_TO_DEGREE = {0: 1, 2: 2, 4: 3, 5: 4, 7: 5, 9: 6, 11: 7}
 _DEGREE_TO_PC = {1: 0, 2: 2, 3: 4, 4: 5, 5: 7, 6: 9, 7: 11}
 
-# 调性偏移：bA=Ab, bB=Bb 等，简化为降号调；b1–b7 为数字形式的降号调
-TONALITY_FLAT_OFFSET = {"A": -1, "B": -2, "C": 0, "D": -1, "E": -2, "F": -1, "G": -2}
+# 调性偏移：bA=Ab, bB=Bb, bC=Cb 等，降号调根音 pitch class (0–11)
+TONALITY_FLAT_OFFSET = {"C": 11, "D": 1, "E": 3, "F": 4, "G": 6, "A": 8, "B": 10}
 # 1–7 对应 CDEFGAB，b+数字 的降号调半音偏移
-TONALITY_FLAT_BY_DEGREE = {1: -1, 2: -1, 3: -2, 4: -1, 5: -2, 6: -1, 7: -2}
+TONALITY_FLAT_BY_DEGREE = {1: 11, 2: 1, 3: 3, 4: 4, 5: 6, 6: 8, 7: 10}
 # #+数字 的升号调半音偏移
 TONALITY_SHARP_BY_DEGREE = {1: 1, 2: 2, 3: 5, 4: 6, 5: 8, 6: 10, 7: 0}
-# 1–7 无前缀：C/D/E/F/G/A/B 大调半音偏移
-TONALITY_MAJOR_OFFSET = {1: 0, 2: 2, 3: 4, 4: 5, 5: 7, 6: 9, 7: 11}
 # 字母 C–B 大调；#C–#B 升号调
 TONALITY_LETTER_OFFSET = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 TONALITY_SHARP_LETTER = {"C": 1, "D": 3, "E": 5, "F": 6, "G": 8, "A": 10, "B": 0}
@@ -46,7 +44,7 @@ VOLUME_MAP = {
 
 @dataclass
 class GlobalSettings:
-    tonality: str = "1"
+    tonality: str = "0"
     beat_numerator: int = 4
     beat_denominator: int = 4
     bpm: int = 120
@@ -166,12 +164,9 @@ def _parse_global(text: str, inherit: GlobalSettings | None = None) -> tuple[Glo
 
 
 def _tonality_to_semitones(tonality: str) -> int:
-    """调性转半音偏移。1=C, b1=Cb, bA=Ab, #1=C#, 或直接整数如 +2/-1 表示统一偏移"""
+    """调性转半音偏移。数字=上下移半音数(0,1,-1,+2等)；字母+升降号为快捷写法(C=0,D=2,#C=1,bD=1等)"""
     t = tonality.strip()
-    # 1–7 无前缀：C/D/E/F/G/A/B 大调
-    if t.isdigit() and 1 <= int(t) <= 7:
-        return TONALITY_MAJOR_OFFSET[int(t)]
-    # 直接整数：+2, -1, 8 等表示统一半音偏移（带符号或 >7 的数字）
+    # 数字：直接表示上下移多少个半音
     m_int = re.match(r"([+-]?\d+)\s*$", t)
     if m_int:
         return int(m_int.group(1))

@@ -155,6 +155,74 @@ def _check_unrecognized(text: str) -> list[Diagnostic]:
     return diags
 
 
+VOICEVOX_UNREACHABLE_MSG = "VOICEVOX 引擎未连接：请确认 voicevox_engine 已启动（默认端口 50021）"
+
+
+def _has_voicevox_usage(text: str) -> bool:
+    """内容是否包含 \\lyrics 或 \\tts 的 voice_id（会用到 VOICEVOX）"""
+    # \lyrics{syllables}{part}{voice_id} 需至少 {part}{voice_id}
+    if re.search(r"\\lyrics\{[^{}]*\}\{\d+\}\{[^{}]+\}", text, re.I):
+        return True
+    # \tts{text}{lang}{voice_id} 需 {lang}{voice_id}
+    if re.search(r"\\tts\{[^{}]*\}\{[^{}]+\}\{[^{}]+\}", text, re.I):
+        return True
+    return False
+
+
+def _check_voicevox_connection(text: str) -> tuple[list[Diagnostic], bool]:
+    """检查 VOICEVOX 连接。返回 (diags, connected)。当内容无 voicevox 用法时 connected=True。"""
+    diags: list[Diagnostic] = []
+    if not _has_voicevox_usage(text):
+        return diags, True
+    try:
+        from voicevox_client import fetch_singers, VOICEVOX_BASE
+    except ImportError:
+        return diags, True
+    try:
+        fetch_singers(VOICEVOX_BASE)
+        return diags, True
+    except Exception:
+        diags.append(Diagnostic(1, 1, VOICEVOX_UNREACHABLE_MSG, "warning", None, None))
+        return diags, False
+
+
+def _check_lyrics_singing_support(text: str, score: ParsedScore) -> list[Diagnostic]:
+    """检查 \\lyrics 中的 voice_id 是否支持歌唱。连接不上引擎时静默跳过。"""
+    diags: list[Diagnostic] = []
+    try:
+        from voicevox_client import fetch_singers, VOICEVOX_BASE
+    except ImportError:
+        return diags
+    try:
+        singers = fetch_singers(VOICEVOX_BASE)
+    except Exception:
+        return diags  # 连接失败时静默跳过（连接警告由 _check_voicevox_connection 处理）
+    singing_ids = {st.get("id") for s in singers for st in s.get("styles", []) if st.get("id") is not None}
+    if not singing_ids:
+        return diags
+    section_lyrics = getattr(score, "section_lyrics", None) or []
+    unsupported: list[int] = []
+    for sec in section_lyrics:
+        for _part_idx, _syllables, voice_id, _melody in sec:
+            if voice_id is not None and voice_id not in singing_ids and voice_id not in unsupported:
+                unsupported.append(voice_id)
+    if not unsupported:
+        return diags
+    m = re.search(r"\\lyrics\{[^{}]*\}(?:\{\d+\})?(?:\{[^{}]+})?(?:\{[01]})?\s*", text, re.I)
+    if m:
+        line, col = _pos_to_line_col(text, m.start())
+        diags.append(Diagnostic(
+            line, col,
+            f"所选音色（style_id: {unsupported[0]}）不支持歌唱，将使用默认歌唱角色。请查阅VOICEVOX面板。",
+            "warning",
+            m.start(),
+            m.end(),
+        ))
+    else:
+        diags.append(Diagnostic(1, 1, "所选音色可能不支持歌唱，将使用默认歌唱角色。请查阅VOICEVOX面板。", "warning", 0, 0))
+    return diags
+
+
 def _check_fullwidth(text: str) -> list[Diagnostic]:
     """检查全角字符"""
     diags: list[Diagnostic] = []
@@ -203,6 +271,10 @@ def validate(text: str) -> tuple[ParsedScore | None, list[Diagnostic]]:
 
     if score:
         diags.extend(_check_bar_duration(text, score))
+        conn_diags, connected = _check_voicevox_connection(text)
+        diags.extend(conn_diags)
+        if connected:
+            diags.extend(_check_lyrics_singing_support(text, score))
     diags.extend(_check_unrecognized(text))
     diags.extend(_check_fullwidth(text))
     diags.sort(key=lambda d: (d.line, d.column))

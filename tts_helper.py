@@ -28,8 +28,9 @@ def generate_tts_audio(
     global _tts_warned
     if voice_id is not None:
         try:
-            from voicevox_client import synthesize_simple, VOICEVOX_BASE
-            wav_bytes = synthesize_simple(text, voice_id, VOICEVOX_BASE)
+            from voicevox_client import synthesize_simple, resolve_speakers_style_id, VOICEVOX_BASE
+            speaker_id = resolve_speakers_style_id(voice_id, VOICEVOX_BASE) or voice_id
+            wav_bytes = synthesize_simple(text, speaker_id, VOICEVOX_BASE)
             import io
             import soundfile as sf
             data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")

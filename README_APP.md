@@ -17,7 +17,7 @@ python main.py
 ## 支持功能
 
 ### 全局设定
-- `\tonality{1}` / `\tonality{bA}` - 调性
+- `\tonality{0}` / `\tonality{bA}` - 调性
 - `\beat{4/4}` / `\beat{c}` - 拍号
 - `\bpm{120}` - 速度
 - `\no_bar_check` - 禁用小节号检查，beat 无效

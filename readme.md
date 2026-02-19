@@ -142,15 +142,13 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 
 ### 调性
 调性输入在最前面，对所有音符应用统一半音偏移。**篇章之间**可用新的 `\tonality`、`\beat`、`\bpm` 覆盖前面的设定，实现转调、转拍、变速。
-- `\tonality{X}` 表示调性，X 为 1–7 的简谱音名（CDEFGAB），**区分大小写**。
-- `1`=C, `2`=D, `3`=E, `4`=F, `5`=G, `6`=A, `7`=B 大调。
-- `b` 表示降号，写在数字或字母前：`b1`=Cb, `b2`=Db, `bA`=Ab, `bB`=Bb 等。
-- `#` 表示升号：`#1`=C#, `#2`=D# 等。
-- 直接整数表示统一半音偏移：`\tonality{+2}`、`\tonality{-1}`、`\tonality{8}` 等。
+- `\tonality{X}` 表示调性，对所有音符应用半音偏移。
+- **数字**：直接表示上移或下移多少个半音，如 `0`、`1`、`-1`、`+2`。
+- **字母+升降号**：快捷写法，`C`=0、`D`=2、`#C`=1、`bD`=1、`bA`=8 等。
 
 有效的例子：
 ```text
-\tonality{1}
+\tonality{0}
 \tonality{b1}
 \tonality{bA}
 \tonality{bB}
@@ -206,7 +204,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 
 有效的例子：
 ```text
-\tonality{1}
+\tonality{0}
 \beat{4/4}
 \bpm{120}
 
@@ -231,7 +229,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 - 行内歌词：`1(啊) 2(一)` 在音符后加括号（未测试！！）
 
 ```text
-\tonality{1}
+\tonality{0}
 \beat{4/4}
 \lyrics{do/re/mi/fa}
 
@@ -245,7 +243,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 - **melody**：和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
 
 ```text
-\tonality{1}
+\tonality{0}
 \beat{4/4}
 \lyrics{啊/呀/哦}{0}{5}{0}  // 音节/声部0/音色5/第一音旋律
 & 1 2 3 | 4 5 6
@@ -253,7 +251,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 
 和弦 melody 示例（同一声部有和弦时，`0` 取每和弦第一音、`1` 取第二音）：但目前只能启用一个
 ```text
-\tonality{1}
+\tonality{0}
 \beat{4/4}
 \bpm{60}
 \lyrics{低/低/音/音/唱/唱}{0}{5}{0}   // melody=0：取 1/3、2/4、3/5、4/6、5/7、6/1. 中的 1、2、3、4、5、6
@@ -269,7 +267,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 
 有效的例子：
 ```text
-\tonality{1}
+\tonality{0}
 \beat{4/4}
 \bpm{60}
 

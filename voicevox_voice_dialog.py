@@ -17,6 +17,7 @@ from voicevox_client import (
     fetch_singers,
     clear_singers_cache,
     synthesize_simple,
+    resolve_speakers_style_id,
     get_legal_info_for_speaker,
     VOICEVOX_BASE,
 )
@@ -175,7 +176,8 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         self.transient(parent)
 
         self.speakers_data: list[dict] = []
-        self.voice_map: dict[str, tuple[int, str, str]] = {}  # item_id -> (style_id, speaker_name, speaker_uuid)
+        self.singers_data: list[dict] = []
+        self.voice_map: dict[str, tuple[int, str, str]] = {}  # item_id -> (style_id, speaker_name, speaker_uuid)，style_id 统一为 API 返回的 id
         self.selected_style_id: Optional[int] = None
         self.selected_speaker_name: Optional[str] = None
         self._icon_photos: dict[str, tk.PhotoImage] = {}  # 列表图标引用
@@ -208,9 +210,11 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         scroll_l.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
-        # 右侧：全身照背景 + 利用規約
+        # 右侧：全身照背景 + 利用規約，右上角显示当前音色 ID
         right_frame = ttk.LabelFrame(paned, text="角色信息・利用規約", padding=5)
         paned.add(right_frame, weight=3)
+        self._id_label = ttk.Label(right_frame, text="ID: —", font=("", 11))
+        self._id_label.place(relx=1.0, rely=0, anchor=tk.NE, x=-8, y=4)
         self._right_canvas = tk.Canvas(right_frame, bg="#e0e0e0", highlightthickness=0)
         self._right_canvas.pack(fill=tk.BOTH, expand=True)
         text_container = tk.Frame(right_frame, bg="#f8f8f8")
@@ -247,41 +251,46 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                 self.after(0, lambda: self._apply_speakers(speakers_data, singers_data))
             except Exception as e:
                 import traceback
-                self.after(0, lambda: self._on_error(str(e), traceback.format_exc()))
+                err_msg, tb_str = str(e), traceback.format_exc()
+                self.after(0, lambda: self._on_error(err_msg, tb_str))
 
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _apply_speakers(self, data: list[dict], singers: list[dict] | None = None) -> None:
         self.speakers_data = data
+        self.singers_data = singers or []
         self.voice_map = {}
         self._icon_photos.clear()
         self.tree.delete(*self.tree.get_children())
-        # /singers 与 /speakers 角色集不同，style_id 可能不重叠。用 speaker_uuid 匹配：若角色在 singers 中则支持歌唱
-        singing_uuids: set[str] = set()
-        singing_ids: set[int] = set()
-        for s in singers or []:
-            u = s.get("speaker_uuid") or s.get("uuid")
-            if u:
-                singing_uuids.add(str(u))
-            for st in s.get("styles", []):
-                sid = st.get("id")
-                if sid is not None:
-                    singing_ids.add(sid)
+        # 以 /singers 为主：统一使用 VOICEVOX 接口返回的 id，歌唱与复制命令直接可用
+        use_singers = bool(self.singers_data)
         total = 0
-        for sp in data:
-            name = sp.get("name", "?")
-            uuid = sp.get("speaker_uuid", "")
-            for st in sp.get("styles", []):
-                sid = st.get("id", 0)
-                sname = st.get("name", "通常")
-                label = f"{name} - {sname}"
-                can_sing = sid in singing_ids or (uuid and str(uuid) in singing_uuids)
-                sing_label = "是" if can_sing else "否"
-                item = self.tree.insert("", tk.END, text="", values=(label, sing_label))
-                self.voice_map[item] = (sid, name, uuid)
-                total += 1
+        if use_singers:
+            for sp in self.singers_data:
+                name = sp.get("name", "?")
+                uuid = sp.get("speaker_uuid", "") or sp.get("uuid", "")
+                for st in sp.get("styles", []):
+                    sid = st.get("id")
+                    if sid is None:
+                        continue
+                    sname = st.get("name", "通常")
+                    label = f"{name} - {sname}"
+                    item = self.tree.insert("", tk.END, text="", values=(label, "是"))
+                    self.voice_map[item] = (sid, name, uuid)
+                    total += 1
+        else:
+            for sp in data:
+                name = sp.get("name", "?")
+                uuid = sp.get("speaker_uuid", "")
+                for st in sp.get("styles", []):
+                    sid = st.get("id", 0)
+                    sname = st.get("name", "通常")
+                    label = f"{name} - {sname}"
+                    item = self.tree.insert("", tk.END, text="", values=(label, "否"))
+                    self.voice_map[item] = (sid, name, uuid)
+                    total += 1
         status_text = f"已加载 {total} 个音色"
-        if not (singers or []) or (not singing_uuids and not singing_ids):
+        if not use_singers:
             status_text += "（未检测到歌唱角色，请安装波音リツ等歌唱音声库）"
         status_text += "，正在加载头像..."
         self._status.config(text=status_text)
@@ -300,8 +309,9 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
 
     def _load_all_icons(self) -> None:
         """后台为每项加载 icon"""
-        for sp in self.speakers_data:
-            uuid = sp.get("speaker_uuid", "")
+        icon_source = self.singers_data if self.singers_data else self.speakers_data
+        for sp in icon_source:
+            uuid = sp.get("speaker_uuid", "") or sp.get("uuid", "")
             if not uuid:
                 continue
             try:
@@ -318,9 +328,14 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                 is_url = fmt == "url"
                 for st in sp.get("styles", []):
                     sid = st.get("id", 0)
+                    match_id = sid
+                    if self.singers_data:
+                        resolved = resolve_speakers_style_id(sid, self.base_url)
+                        if resolved is not None:
+                            match_id = resolved
                     icon = None
                     for si in style_infos:
-                        if si.get("id") == sid and si.get("icon"):
+                        if si.get("id") == match_id and si.get("icon"):
                             ic = si["icon"]
                             iu = is_url and (ic.startswith("http://") or ic.startswith("https://"))
                             icon = _load_list_icon(ic, is_url=iu)
@@ -352,11 +367,13 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
             return
         item_id = sel[0]
         if item_id not in self.voice_map:
+            self._id_label.config(text="ID: —")
             self._set_background(None)
             return
         style_id, speaker_name, speaker_uuid = self.voice_map[item_id]
         self.selected_style_id = style_id
         self.selected_speaker_name = speaker_name
+        self._id_label.config(text=f"ID: {style_id}")
         _save_last_style_id(style_id)
         info = get_legal_info_for_speaker(speaker_name)
         self.legal_text.config(state=tk.NORMAL)
@@ -371,17 +388,28 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         self.update_idletasks()
 
         if not skip_preview:
+            preview_id = style_id
+            if self.singers_data:
+                resolved = resolve_speakers_style_id(style_id, self.base_url)
+                if resolved is not None:
+                    preview_id = resolved
             def _synth():
                 try:
-                    wav = synthesize_simple(PREVIEW_TEXT, style_id, self.base_url)
+                    wav = synthesize_simple(PREVIEW_TEXT, preview_id, self.base_url)
                     threading.Thread(target=_play_wav_bytes, args=(wav,), daemon=True).start()
                     self.after(0, lambda: self._status.config(text=""))
                 except Exception as e:
                     import traceback
-                    self.after(0, lambda: self._on_preview_error(str(e), traceback.format_exc()))
+                    err_msg, tb_str = str(e), traceback.format_exc()
+                    self.after(0, lambda: self._on_preview_error(err_msg, tb_str))
 
             threading.Thread(target=_synth, daemon=True).start()
         # 异步加载该风格专属全身照做背景（同角色不同风格照片不同）
+        portrait_match_id = style_id
+        if self.singers_data:
+            resolved = resolve_speakers_style_id(style_id, self.base_url)
+            if resolved is not None:
+                portrait_match_id = resolved
         def _fetch():
             portrait, is_url = "", False
             for fmt in ("url", "base64"):
@@ -389,7 +417,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                     inf = fetch_speaker_info(speaker_uuid, self.base_url, resource_format=fmt)
                     # 优先使用当前 style_id 对应的 portrait，同角色不同风格照片不同
                     for si in inf.get("style_infos") or []:
-                        if si.get("id") == style_id and si.get("portrait"):
+                        if si.get("id") == portrait_match_id and si.get("portrait"):
                             portrait = si["portrait"]
                             break
                     if not portrait:
