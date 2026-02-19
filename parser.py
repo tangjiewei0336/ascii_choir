@@ -101,6 +101,27 @@ class TTSEvent:
     voice_id: Optional[int] = None  # VOICEVOX style_id，有则用 VOICEVOX 不用 edge-tts
 
 
+# [cello][guitar] 等乐器标记：对当前行及后续篇章同一声部生效
+VALID_INSTRUMENT_TAGS = {"grand_piano", "piano", "violin", "cello", "trumpet", "clarinet", "oboe", "alto_sax", "tenor_sax", "bass", "guitar"}
+
+
+def _strip_instrument_tag(line: str) -> tuple[str, Optional[str]]:
+    """从行首剥离 [cello][guitar] 等乐器标记，返回 (剩余行, 乐器名或 None)。"""
+    rest = line.lstrip()
+    instrument: Optional[str] = None
+    while rest.startswith("["):
+        end = _find_matching_bracket(rest, 0)
+        if end < 0:
+            break
+        inner = rest[1:end].strip().lower()
+        if inner in VALID_INSTRUMENT_TAGS:
+            instrument = "grand_piano" if inner == "piano" else inner
+            rest = rest[end + 1 :].lstrip()
+        else:
+            break  # [8va][8vb] 等非乐器标记不剥离
+    return rest, instrument
+
+
 @dataclass
 class ParsedScore:
     settings: GlobalSettings
@@ -109,6 +130,7 @@ class ParsedScore:
     section_settings: list[GlobalSettings] = field(default_factory=list)  # 每篇章的独立设定（覆盖前面的）
     section_tts: list[list[TTSEvent]] = field(default_factory=list)  # 每篇章前的 TTS，section_tts[i] 在 section i 之前播放
     section_lyrics: list[list[tuple[int, list[str], Optional[int], int]]] = field(default_factory=list)  # 每篇章的 \lyrics{(part_index, syllables, voice_id?, melody_part)}
+    section_part_instruments: list[dict[int, str]] = field(default_factory=list)  # 每篇章每声部的乐器，part_index -> instrument
 
 
 def _copy_settings(s: GlobalSettings) -> GlobalSettings:
@@ -390,6 +412,11 @@ def _parse_notation_scope(
     i = 0
     repeat_start = 0  # |: 或最开头，用于 :| 重复
     content = content.strip()
+    # 若整段被一对括号包裹（如 [8va](...) 的 scope 提取错误时），先剥掉外层括号
+    if content.startswith("("):
+        end_p = _find_matching_paren(content, 0)
+        if end_p == len(content) - 1:
+            content = content[1:-1].strip()
     n = len(content)
     prev_note_midi: Optional[int] = None  # 用于 ~ 连音线
     volume = default_volume
@@ -405,6 +432,7 @@ def _parse_notation_scope(
         bar_beats = 0.0
         tie_target_ev = None
         tie_target_bar = None
+        bar_accidentals.clear()
 
     def get_arpeggio_for_event() -> bool:
         """返回当前是否应用琶音，若为 next_arpeggio 则消费之"""
@@ -431,16 +459,20 @@ def _parse_notation_scope(
             if tilde_rest:
                 dur = max(0, beats_per_bar - bar_beats)
             return RestEvent(duration_beats=dur)
-        # 剥离升降号前缀
+        # 剥离升降号前缀；若无显式升降号，则使用小节内该音级已记录的临时记号（五线谱规则）
         core = tok
+        has_explicit_acc = False
         if core.startswith("#"):
             acc = 1
+            has_explicit_acc = True
             core = core[1:]
         elif core.startswith("b") and len(core) > 1 and core[1].isdigit():
             acc = -1
+            has_explicit_acc = True
             core = core[1:]
         elif core.startswith("^"):
             acc = 2
+            has_explicit_acc = True
             core = core[1:]
         left_dots = right_dots = 0
         while core.startswith("."):
@@ -458,12 +490,20 @@ def _parse_notation_scope(
         num = int(core[0])
         if num == 0:
             return RestEvent(duration_beats=base_duration * (1 + ext) * (0.5**shrt))
+        if not has_explicit_acc:
+            acc = bar_accidentals.get(num, 0) if deviation_explicit else 0
+        else:
+            if deviation_explicit:
+                bar_accidentals[num] = acc
         dur = base_duration * (1 + ext) * (0.5**shrt)  # - 增加一拍，非乘2
         oct_final = part_octave - left_dots + right_dots
         midi = _simplified_to_midi(num, oct_final, acc, tonality_offset)
         return NoteEvent(midi=midi, duration_beats=dur, volume=volume, arpeggio=apply_arpeggio)
 
+    bar_accidentals: dict[int, int] = {}  # 小节内各音级的临时升降号：1-7 -> 0/1/-1/2
+
     def parse_accidental(tok: str) -> int:
+        """从 token 解析升降号。"""
         if tok.startswith("#"):
             return 1
         if tok.startswith("b") and len(tok) > 1 and tok[1].isdigit():
@@ -841,6 +881,11 @@ def _parse_notation_scope(
                         else:
                             tie_target_ev = new_ev
                             tie_target_bar = current_bar
+                elif ev and isinstance(ev, RestEvent):
+                    current_bar.events.append(ev)
+                    bar_beats += ev.duration_beats
+                    tie_target_ev = None
+                    tie_target_bar = None
             continue
         # 和弦 1/3/5（每个音可单独带升降号）；末尾 _ 表示四分除以2=八分
         if "/" in tok:
@@ -1084,8 +1129,40 @@ def _strip_comments(text: str) -> str:
     return re.sub(r"//[^\n]*", "", text)
 
 
+def _extract_and_expand_defines(text: str) -> str:
+    """
+    提取 \\define{key}{value} 并将文中所有 [key] 替换为 value。
+    只有方括号中的内容在 define 中定义时才会被替换；未定义的 [xxx] 保持原样。
+    """
+    defines: dict[str, str] = {}
+    rest = text
+
+    # 1. 提取所有 \define{key}{value}
+    define_pattern = re.compile(r"\\define\{([^{}]+)\}\{([^{}]*)\}\s*", re.I)
+    while True:
+        m = define_pattern.search(rest)
+        if not m:
+            break
+        key = m.group(1).strip()
+        value = m.group(2)
+        if key:
+            defines[key] = value
+        rest = rest[: m.start()] + rest[m.end() :]
+
+    if not defines:
+        return text
+
+    # 2. 替换 [key] 为 value（仅当 key 在 defines 中）
+    def replacer(m: re.Match) -> str:
+        inner = m.group(1).strip()
+        return defines.get(inner, m.group(0))
+
+    return re.sub(r"\[([^\]]+)\]", replacer, rest)
+
+
 def parse(text: str) -> ParsedScore:
     text = _strip_comments(text)
+    text = _extract_and_expand_defines(text)
     settings, rest = _parse_global(text)
     _check_brackets_raise(text)
     sections_raw = _split_sections(rest)
@@ -1099,13 +1176,15 @@ def parse(text: str) -> ParsedScore:
                 parts=[part],
                 sections=[[part]],
                 section_settings=[settings],
+                section_part_instruments=[{0: "grand_piano"}],
             )
-        return ParsedScore(settings=settings, parts=[], sections=[], section_settings=[])
+        return ParsedScore(settings=settings, parts=[], sections=[], section_settings=[], section_part_instruments=[])
 
     sections: list[list[Part]] = []
     section_settings_list: list[GlobalSettings] = []
     section_tts_list: list[list[TTSEvent]] = []
     section_lyrics_list: list[list[tuple[int, list[str], Optional[int], int]]] = []
+    section_part_instruments_list: list[dict[int, str]] = []
     pending_tts: list[TTSEvent] = []
     inherit = settings
 
@@ -1147,10 +1226,20 @@ def parse(text: str) -> ParsedScore:
             n_prev_parts = max(len(p) for p in sections)
             prev_bars_per_part = [sections[-1][pi].bars if pi < len(sections[-1]) else [] for pi in range(n_prev_parts)]
 
+        # 继承上一篇章的乐器；[cello] 等标记对当前行及后续篇章同声部生效
+        part_instruments: dict[int, str] = {}
+        if section_part_instruments_list:
+            n_prev = max(section_part_instruments_list[-1].keys()) + 1
+            part_instruments = {i: section_part_instruments_list[-1].get(i, "grand_piano") for i in range(n_prev)}
+
         sec_parts: list[Part] = []
         for part_idx, line in enumerate(part_lines):
             if line.strip().startswith("&"):
                 line = line.strip()[1:].lstrip()
+            # 剥离行首 [cello][guitar] 等乐器标记
+            line, inst_tag = _strip_instrument_tag(line)
+            if inst_tag:
+                part_instruments[part_idx] = inst_tag
             prev_bars = prev_bars_per_part[part_idx] if part_idx < len(prev_bars_per_part) else None
             part, _ = _parse_part_line(
                 line, base_duration, beats_per_bar, sec_settings.no_bar_check, tonality_offset, prev_bars,
@@ -1159,12 +1248,16 @@ def parse(text: str) -> ParsedScore:
                 sec_parts.append(part)
 
         if sec_parts:
+            for part_idx in range(len(sec_parts)):
+                if part_idx not in part_instruments:
+                    part_instruments[part_idx] = "grand_piano"
             sections.append(sec_parts)
             section_settings_list.append(sec_settings)
             section_lyrics_list.append(block_lyrics)
+            section_part_instruments_list.append(part_instruments)
 
     if not sections:
-        return ParsedScore(settings=settings, parts=[], sections=[], section_settings=[], section_lyrics=[])
+        return ParsedScore(settings=settings, parts=[], sections=[], section_settings=[], section_lyrics=[], section_part_instruments=[])
 
     # 末尾的 TTS（最后一篇章之后）
     if pending_tts:
@@ -1188,4 +1281,5 @@ def parse(text: str) -> ParsedScore:
         section_settings=section_settings_list,
         section_tts=section_tts_list,
         section_lyrics=section_lyrics_list,
+        section_part_instruments=section_part_instruments_list,
     )

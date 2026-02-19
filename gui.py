@@ -311,6 +311,10 @@ class App:
         tts_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="TTS", menu=tts_menu)
         tts_menu.add_command(label="VOICEVOX 音色选择...", command=self._on_voicevox_voices)
+
+        instrument_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="乐器", menu=instrument_menu)
+        instrument_menu.add_command(label="乐器面板...", command=self._on_instrument_panel)
         
         self.root.bind("<Control-n>", lambda e: self._on_new())
         self.root.bind("<Control-o>", lambda e: self._on_open())
@@ -606,6 +610,15 @@ class App:
         except ImportError as e:
             import traceback
             show_error_detail(self.root, "错误", f"无法加载 VOICEVOX 模块: {e}", traceback.format_exc())
+
+    def _on_instrument_panel(self):
+        """打开乐器面板对话框"""
+        try:
+            from instrument_dialog import show_instrument_dialog
+            show_instrument_dialog(self.root)
+        except ImportError as e:
+            import traceback
+            show_error_detail(self.root, "错误", f"无法加载乐器面板: {e}", traceback.format_exc())
     
     def _on_open_workspace(self):
         default_dir = WORKSPACES_DIR
@@ -904,6 +917,7 @@ class App:
 
         self.btn_voicevox = ttk.Button(toolbar, text="VOICEVOX 音色", command=self._on_voicevox_voices)
         self.btn_voicevox.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(toolbar, text="乐器面板", command=self._on_instrument_panel).pack(side=tk.LEFT, padx=(0, 5))
         
         ttk.Button(toolbar, text="打开示例工作区", command=self._on_open_example_workspace).pack(side=tk.LEFT, padx=(0, 5))
         
@@ -1089,7 +1103,7 @@ class App:
         hint_bg = "#2d2d2d" if self._dark_mode else "#f0f0f0"
         self.hint = tk.Label(
             main,
-            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线, # b ^ 升降还原, [xxx](...) 记号, [dc][fine] 反复, // 单行注释, \\tts{文本}{zh/ja/en}{voice_id} 篇章间语音, \\lyrics{字/字}{part}{voice_id}{melody} 歌词, 1(啊) 行内歌词, \\import{文件名} 导入 | 文件→导出带歌词简谱(JPG) | Ctrl+F 对齐 | 括号高亮",
+            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线, # b ^ 升降还原, [cello][guitar] 音色, [xxx](...) 记号, [dc][fine] 反复, // 单行注释, \\tts{文本}{zh/ja/en}{voice_id} 篇章间语音, \\lyrics{字/字}{part}{voice_id}{melody} 歌词, 1(啊) 行内歌词, \\import{文件名} 导入 | 文件→导出带歌词简谱(JPG) | Ctrl+F 对齐 | 括号高亮",
             font=("", 9),
             fg=colors["hint_fg"],
             bg=hint_bg,

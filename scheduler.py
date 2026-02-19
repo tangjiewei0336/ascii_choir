@@ -22,6 +22,7 @@ class ScheduledNote:
     volume: float = 0.6
     part_index: int = 0  # 声部索引，用于歌词合成时筛选旋律
     is_continuation: bool = False  # 连音延续，不重新触发，需与前一音合并
+    instrument: str = "grand_piano"  # 音色，由 [cello][guitar] 等标记指定
 
 
 def _merge_tied_events(
@@ -114,6 +115,7 @@ def _part_events_to_scheduled(
     bar_starts: list[float],
     beats_per_second: float,
     part_index: int = 0,
+    instrument: str = "grand_piano",
 ) -> list[ScheduledNote]:
     """将一声部的所有小节事件转为 ScheduledNote，跨小节连音已合并"""
     events_with_start: list[tuple[float, NoteEvent | ChordEvent | RestEvent]] = []
@@ -138,6 +140,7 @@ def _part_events_to_scheduled(
             volume=vol,
             part_index=part_index,
             is_continuation=is_cont,
+            instrument=instrument,
         )
         for start, dur, midis, vol, is_cont in merged
     ]
@@ -192,6 +195,7 @@ def _collect_notes_from_aligned(
     default_beats_per_bar: float,
     stop_at_fine: bool = False,
     stop_at_dc: bool = False,
+    section_part_instruments: dict[int, str] | None = None,
 ) -> tuple[list[ScheduledNote], float, bool, bool]:
     """
     从对齐的小节列表收集音符。按声部合并跨小节连音后调度。
@@ -230,8 +234,9 @@ def _collect_notes_from_aligned(
     notes: list[ScheduledNote] = []
     for part_idx in range(num_parts):
         part_bars = [row[part_idx] for row in bars_to_process]
+        inst = (section_part_instruments or {}).get(part_idx, "grand_piano")
         part_notes = _part_events_to_scheduled(
-            part_bars, bar_starts[:-1], beats_per_second, part_index=part_idx
+            part_bars, bar_starts[:-1], beats_per_second, part_index=part_idx, instrument=inst
         )
         notes.extend(part_notes)
     return notes, global_beat, hit_fine, hit_dc
@@ -251,6 +256,7 @@ def schedule(score: ParsedScore) -> list[ScheduledNote]:
                 volume=n.volume,
                 part_index=n.part_index,
                 is_continuation=getattr(n, "is_continuation", False),
+                instrument=getattr(n, "instrument", "grand_piano"),
             ))
         if seg.notes:
             t_offset += max(n.start_time + n.duration for n in seg.notes)
@@ -284,14 +290,24 @@ def schedule_segments(score: ParsedScore) -> list[ScheduledSegment]:
 
         beats_per_second = bpm / 60.0
         aligned = _align_parts(section)
+        section_part_instruments = (
+            score.section_part_instruments[sec_idx]
+            if hasattr(score, "section_part_instruments") and sec_idx < len(getattr(score, "section_part_instruments", []))
+            else None
+        )
         notes1, next_beat, hit_fine, hit_dc = _collect_notes_from_aligned(
             aligned, global_beat, beats_per_second, default_beats_per_bar,
             stop_at_fine=False, stop_at_dc=True,
+            section_part_instruments=section_part_instruments,
         )
         # 音符的 start_time 转为相对于本篇章开始（0）
         seg_start = global_beat / beats_per_second
         rel_notes = [
-            ScheduledNote(n.start_time - seg_start, n.duration, n.midis, n.volume, n.part_index, is_continuation=getattr(n, "is_continuation", False))
+            ScheduledNote(
+                n.start_time - seg_start, n.duration, n.midis, n.volume, n.part_index,
+                is_continuation=getattr(n, "is_continuation", False),
+                instrument=getattr(n, "instrument", "grand_piano"),
+            )
             for n in notes1
         ]
         segments.append(ScheduledSegment(tts_before=tts_before, notes=rel_notes, section_index=sec_idx))
@@ -311,11 +327,19 @@ def schedule_segments(score: ParsedScore) -> list[ScheduledSegment]:
                     bps = score.settings.bpm / 60.0
                     def_beats = 4.0 if score.settings.no_bar_check else float(score.settings.beat_numerator)
                 aligned = _align_parts(sec)
+                sec_inst = score.section_part_instruments[s_idx] if hasattr(score, "section_part_instruments") and s_idx < len(getattr(score, "section_part_instruments", [])) else None
                 nd, next_b, hit_f, _ = _collect_notes_from_aligned(
-                    aligned, dc_beat, bps, def_beats, stop_at_fine=True
+                    aligned, dc_beat, bps, def_beats, stop_at_fine=True,
+                    section_part_instruments=sec_inst,
                 )
                 seg_s = dc_beat / bps
-                rel = [ScheduledNote(n.start_time - seg_s, n.duration, n.midis, n.volume, n.part_index, is_continuation=getattr(n, "is_continuation", False)) for n in nd]
+                rel = [
+                    ScheduledNote(n.start_time - seg_s, n.duration, n.midis, n.volume, n.part_index,
+                        is_continuation=getattr(n, "is_continuation", False),
+                        instrument=getattr(n, "instrument", "grand_piano"),
+                    )
+                    for n in nd
+                ]
                 dc_segments.append(ScheduledSegment(tts_before=tts, notes=rel, section_index=s_idx))
                 dc_beat = next_b
                 if hit_f:
