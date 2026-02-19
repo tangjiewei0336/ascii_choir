@@ -65,11 +65,61 @@ class Player:
         except Exception:
             return None
     
+    def _merge_continuation_notes(self, notes: list[ScheduledNote]) -> list[ScheduledNote]:
+        """
+        合并 is_continuation 事件：将连音延续与前一同音高音符合并，避免重复触发。
+        和弦内被 tie 的音会拆出单独延长，以保持和弦其他音相同时值。
+        """
+        result: list[ScheduledNote] = []
+        for n in notes:
+            if not getattr(n, "is_continuation", False) or len(n.midis) != 1:
+                result.append(n)
+                continue
+            midi = n.midis[0]
+            # 查找前一音符：结束时间等于本音符开始，且包含该 midi
+            merged = False
+            for i in range(len(result) - 1, -1, -1):
+                prev = result[i]
+                prev_end = prev.start_time + prev.duration
+                if abs(prev_end - n.start_time) > 1e-6:
+                    continue
+                if midi not in prev.midis:
+                    continue
+                # 找到：合并延续
+                merged = True
+                if len(prev.midis) == 1:
+                    # 单音：直接延长
+                    result[i] = ScheduledNote(
+                        prev.start_time, prev.duration + n.duration,
+                        prev.midis, prev.volume, prev.part_index,
+                        is_continuation=False,
+                    )
+                else:
+                    # 和弦：拆出被 tie 的音单独延长，其余保持
+                    others = [m for m in prev.midis if m != midi]
+                    result.pop(i)
+                    if others:
+                        result.append(ScheduledNote(
+                            prev.start_time, prev.duration, others,
+                            prev.volume, prev.part_index, is_continuation=False,
+                        ))
+                    result.append(ScheduledNote(
+                        prev.start_time, prev.duration + n.duration, [midi],
+                        prev.volume, prev.part_index, is_continuation=False,
+                    ))
+                    # 和弦拆开后需按 start_time 排序
+                    result.sort(key=lambda x: (x.start_time, -len(x.midis)))
+                break
+            if not merged:
+                result.append(n)
+        return result
+
     def _render_notes(self, notes: list[ScheduledNote]) -> tuple[np.ndarray, float]:
         """
         将 ScheduledNote 列表渲染为混合后的音频数组。
         返回 (audio_array, total_duration_seconds)
         """
+        notes = self._merge_continuation_notes(notes)
         if not notes:
             return np.array([], dtype=np.float32), 0.0
         

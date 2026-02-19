@@ -628,6 +628,7 @@ class App:
             self.root.title(f"简谱演奏 - {path.name}")
             base = self._get_breakpoint_base_dir()
             self._breakpoints = set(load_breakpoints(base, path.name)) if base else set()
+            self._clamp_breakpoints_to_line_count(len(content.splitlines()))
             self._do_highlights()
             self._highlight_current_file_in_workspace()
             self.root.after(100, self._update_preview)
@@ -1088,7 +1089,7 @@ class App:
         hint_bg = "#2d2d2d" if self._dark_mode else "#f0f0f0"
         self.hint = tk.Label(
             main,
-            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线(可跨小节), # b ^ 升降还原, [xxx](...) 记号, [dc][fine] 反复, // 单行注释, \\tts{文本}{zh/ja/en}{voice_id} 篇章间语音(voice_id用VOICEVOX), \\lyrics{字/字}{part}{voice_id}{melody} 歌词(melody:0第一音1第二音), 1(啊) 行内歌词, \\import{文件名} 导入 | 文件→导出带歌词简谱(JPG) | Ctrl+F 对齐 | 括号高亮",
+            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线, # b ^ 升降还原, [xxx](...) 记号, [dc][fine] 反复, // 单行注释, \\tts{文本}{zh/ja/en}{voice_id} 篇章间语音, \\lyrics{字/字}{part}{voice_id}{melody} 歌词, 1(啊) 行内歌词, \\import{文件名} 导入 | 文件→导出带歌词简谱(JPG) | Ctrl+F 对齐 | 括号高亮",
             font=("", 9),
             fg=colors["hint_fg"],
             bg=hint_bg,
@@ -1175,8 +1176,14 @@ class App:
                             in_notation_scope = False
                         cur.append(c)
                     elif c == "|":
-                        parts.append("".join(cur))
-                        cur = []
+                        if cur and cur[-1] == ":":
+                            cur.append(c)
+                        elif i + 1 < n and s[i + 1] == ":":
+                            parts.append("".join(cur))
+                            cur = [c]
+                        else:
+                            parts.append("".join(cur))
+                            cur = []
                     else:
                         cur.append(c)
                     i += 1
@@ -1195,8 +1202,15 @@ class App:
                     depth -= 1
                     cur.append(c)
                 elif c == "|" and depth == 0:
-                    parts.append("".join(cur))
-                    cur = []
+                    # 不拆分重复记号：:| 的 | 属于前一 bar；|: 的 | 属于下一 bar
+                    if cur and cur[-1] == ":":
+                        cur.append(c)  # :| 保持在一起
+                    elif i + 1 < n and s[i + 1] == ":":
+                        parts.append("".join(cur))
+                        cur = [c]  # |: 的 | 归入下一 bar
+                    else:
+                        parts.append("".join(cur))
+                        cur = []
                 else:
                     cur.append(c)
                 i += 1
@@ -1205,9 +1219,16 @@ class App:
                 parts.append("".join(cur))
             prefix = parts[0].rstrip() if parts else ""
             suffix = ""
-            if len(parts) >= 2 and "](|" in (parts[0] if parts else "") and parts[-1].strip() == ")":
-                suffix = ")"
-                bars = [p.strip() for p in parts[1:-1]]
+            if len(parts) >= 2 and "](|" in s:
+                if parts[-1].strip() == ")":
+                    suffix = ")"
+                    bars = [p.strip() for p in parts[1:-1]]
+                elif parts[-1].rstrip().endswith(")"):
+                    suffix = ")"
+                    last_bar = parts[-1].rstrip()[:-1].rstrip()
+                    bars = [p.strip() for p in parts[1:-1]] + [last_bar]
+                else:
+                    bars = [p.strip() for p in parts[1:] if p.strip()]
             else:
                 bars = [p.strip() for p in parts[1:] if p.strip()]
             return prefix, bars, suffix
@@ -1225,6 +1246,11 @@ class App:
                 while len(bars) < max_bars:
                     bars.append("")
             col_widths = [max(max(len(bars[j]) for _, bars, _ in all_data), 1) for j in range(max_bars)]
+            # 前缀（含 [8va] 等记号）需对齐，使小节号 | 起始列一致
+            max_prefix_len = 0
+            for prefix, bars, suffix in all_data:
+                sep = " |" if prefix.rstrip().endswith("&") else "|"
+                max_prefix_len = max(max_prefix_len, len(prefix.rstrip()) + len(sep))
             result = []
             for (_, line), (prefix, bars, suffix) in zip(part_lines, all_data):
                 if not bars and max_bars > 0:
@@ -1232,7 +1258,8 @@ class App:
                     continue
                 padded = [b.ljust(col_widths[j]) for j, b in enumerate(bars)]
                 sep = " |" if prefix.rstrip().endswith("&") else "|"
-                result.append(prefix.rstrip() + sep + "|".join(padded) + suffix)
+                before_bars = (prefix.rstrip() + sep).ljust(max_prefix_len)
+                result.append(before_bars + "|".join(padded) + suffix)
             return result
         
         new_sections: list[list[str]] = []
@@ -1246,9 +1273,10 @@ class App:
                     split_at = 1
                     for k in range(1, n_bars + 1):
                         ok = True
-                        for prefix, bars in all_data:
+                        for prefix, bars, suffix in all_data:
                             seg = bars[:k]
-                            test_len = len(prefix) + 2 + sum(len(b) + 1 for b in seg)
+                            sep = " |" if prefix.rstrip().endswith("&") else "|"
+                            test_len = len(prefix.rstrip()) + len(sep) + sum(len(b) + 1 for b in seg) - (1 if seg else 0)
                             if test_len > max_chars:
                                 ok = False
                                 break
@@ -1288,6 +1316,7 @@ class App:
             new_content = "\n".join(header_lines).rstrip() + "\n\n" + new_content
         self.text.delete(1.0, tk.END)
         self.text.insert(tk.END, new_content)
+        self._clamp_breakpoints_to_line_count(len(new_content.splitlines()))
         return "break"
     
     def _highlight_brackets(self):
@@ -1359,6 +1388,16 @@ class App:
         if self.current_file_path:
             return self.current_file_path.parent
         return None
+
+    def _clamp_breakpoints_to_line_count(self, line_count: int) -> None:
+        """移除超出文件行数的断点，避免断点行被删后无法添加 B 点"""
+        if line_count <= 0:
+            return
+        invalid = {ln for ln in self._breakpoints if ln > line_count or ln < 1}
+        if invalid:
+            self._breakpoints -= invalid
+            self._save_breakpoints()
+            self._redraw_breakpoints()
 
     def _breakpoint_line_at_y(self, y: float) -> int | None:
         """返回 y 坐标对应的行号，若不在任一行则返回 None"""

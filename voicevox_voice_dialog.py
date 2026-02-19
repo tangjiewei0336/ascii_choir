@@ -53,6 +53,20 @@ def _save_last_style_id(style_id: int) -> None:
 
 # 左侧列表大头照尺寸（上中部裁剪），稍大以增加行距
 LIST_ICON_SIZE = (44, 44)
+
+
+def _safe_ui(dlg, func):
+    """在对话框仍存在时执行 UI 更新，关闭后忽略（避免 TclError）"""
+    def _run():
+        try:
+            if dlg.winfo_exists():
+                func()
+        except tk.TclError:
+            pass
+    try:
+        dlg.after(0, _run)
+    except tk.TclError:
+        pass
 # 右侧全身照背景
 BG_PORTRAIT_MIN_SIZE = (200, 300)
 
@@ -248,11 +262,11 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
             try:
                 speakers_data = fetch_speakers(self.base_url)
                 singers_data = fetch_singers(self.base_url)
-                self.after(0, lambda: self._apply_speakers(speakers_data, singers_data))
+                _safe_ui(self, lambda: self._apply_speakers(speakers_data, singers_data))
             except Exception as e:
                 import traceback
                 err_msg, tb_str = str(e), traceback.format_exc()
-                self.after(0, lambda: self._on_error(err_msg, tb_str))
+                _safe_ui(self, lambda: self._on_error(err_msg, tb_str))
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -301,9 +315,13 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
             for iid, (sid, _, _) in self.voice_map.items():
                 if sid == last_style:
                     def _restore(item=iid):
-                        self.tree.selection_set(item)
-                        self.tree.see(item)
-                        self._on_select(skip_preview=True)
+                        try:
+                            if self.winfo_exists():
+                                self.tree.selection_set(item)
+                                self.tree.see(item)
+                                self._on_select(skip_preview=True)
+                        except tk.TclError:
+                            pass
                     self.after(200, _restore)
                     break
 
@@ -346,11 +364,11 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                         for iid, (isid, _, cuuid) in self.voice_map.items():
                             if cuuid == uuid and isid == sid:
                                 self._icon_photos[iid] = icon
-                                self.after(0, lambda x=iid, img=icon: self.tree.item(x, image=img))
+                                _safe_ui(self, lambda x=iid, img=icon: self.tree.item(x, image=img))
                                 break
             except Exception:
                 pass
-        self.after(0, lambda: self._status.config(text=f"已加载 {len(self.voice_map)} 个音色"))
+        _safe_ui(self, lambda: self._status.config(text=f"已加载 {len(self.voice_map)} 个音色"))
 
     def _on_error(self, msg: str, tb: str = "") -> None:
         self._status.config(text="")
@@ -397,11 +415,11 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                 try:
                     wav = synthesize_simple(PREVIEW_TEXT, preview_id, self.base_url)
                     threading.Thread(target=_play_wav_bytes, args=(wav,), daemon=True).start()
-                    self.after(0, lambda: self._status.config(text=""))
+                    _safe_ui(self, lambda: self._status.config(text=""))
                 except Exception as e:
                     import traceback
                     err_msg, tb_str = str(e), traceback.format_exc()
-                    self.after(0, lambda: self._on_preview_error(err_msg, tb_str))
+                    _safe_ui(self, lambda: self._on_preview_error(err_msg, tb_str))
 
             threading.Thread(target=_synth, daemon=True).start()
         # 异步加载该风格专属全身照做背景（同角色不同风格照片不同）
@@ -437,7 +455,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                 photo = _load_background_portrait(portrait, is_url, (cw, ch))
             else:
                 photo = None
-            self.after(0, lambda: self._set_background(photo))
+            _safe_ui(self, lambda: self._set_background(photo))
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -518,7 +536,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                     score_text, sample_rate=44100, voice_id_override=voice_id, base_url=self.base_url
                 )
                 if not result:
-                    self.after(0, lambda: self._acappella_done(self._no_lyrics_message(), None))
+                    _safe_ui(self, lambda: self._acappella_done(self._no_lyrics_message(), None))
                     return
                 audio, _ = result
                 buf = io.BytesIO()
@@ -528,7 +546,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                 threading.Thread(target=_play_wav_bytes, args=(wav_bytes,), daemon=True).start()
             except Exception as e:
                 import traceback
-                self.after(0, lambda err=str(e), tb=traceback.format_exc(): self._acappella_done(err, tb))
+                _safe_ui(self, lambda err=str(e), tb=traceback.format_exc(): self._acappella_done(err, tb))
 
         threading.Thread(target=_do, daemon=True).start()
 

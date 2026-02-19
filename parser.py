@@ -2,6 +2,7 @@
 简谱解析器：解析全局设定和简谱语法，支持括号跨小节。
 错误由解析过程抛出 ParseError。
 """
+import copy
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -384,6 +385,7 @@ def _parse_notation_scope(
     current_bar = BarContent()
     bar_beats = 0.0
     i = 0
+    repeat_start = 0  # |: 或最开头，用于 :| 重复
     content = content.strip()
     n = len(content)
     prev_note_midi: Optional[int] = None  # 用于 ~ 连音线
@@ -499,6 +501,26 @@ def _parse_notation_scope(
         if content[i] == "|":
             flush_bar()
             i += 1
+            continue
+        # |: 重复起点
+        if i + 1 < n and content[i : i + 2] == "|:":
+            flush_bar()
+            repeat_start = len(bars)
+            i += 2
+            continue
+        # :| 重复终点：将 repeat_start 到当前的小节重复一次
+        # :|: 特例：结束当前重复后立即开始新重复（第一结尾 + 第二开头）
+        if i + 1 < n and content[i : i + 2] == ":|":
+            flush_bar()
+            seg = bars[repeat_start:]
+            if seg:
+                for b in seg:
+                    bars.append(copy.deepcopy(b))
+            if i + 2 < n and content[i : i + 3] == ":|:":
+                repeat_start = len(bars)
+                i += 3
+            else:
+                i += 2
             continue
         if content[i] == "]":
             depth -= 1
@@ -625,44 +647,57 @@ def _parse_notation_scope(
                     pos = i
                 line, col = _pos_to_line_col(content, pos)
                 raise ParseError(line, col, "和声记号 [+3][-3][+5][-5] 不可用于含升降号的音符", pos, pos + len(acc_tok))
-            notes_in_tuplet = []
+            notes_in_tuplet: list[tuple[str, list[int], float, bool]] = []  # (kind, midis, _, tied_from_prev)
             for t in tokens:
                 if not t or t in "-_":
                     continue
+                tied_from_prev = t.startswith("~")
+                t_clean = t.lstrip("~")  # 连音线 ~ 不影响时值，只做渲染
                 if "/" in t:
                     parts = t.split("/")
                     chord = []
                     for p in parts:
-                        ev = parse_note_token(p, part_octave, 0)
+                        ev = parse_note_token(p.lstrip("~"), part_octave, 0)
                         if ev and isinstance(ev, NoteEvent):
                             chord.append(ev.midi)
                     if chord:
-                        notes_in_tuplet.append(("chord", chord, base_duration))
+                        notes_in_tuplet.append(("chord", chord, base_duration, tied_from_prev))
                 else:
-                    ev = parse_note_token(t, part_octave, 0)
+                    ev = parse_note_token(t_clean, part_octave, 0)
                     if ev and isinstance(ev, NoteEvent):
-                        notes_in_tuplet.append(("note", [ev.midi], ev.duration_beats))
+                        notes_in_tuplet.append(("note", [ev.midi], ev.duration_beats, tied_from_prev))
                     elif ev and isinstance(ev, RestEvent):
-                        notes_in_tuplet.append(("rest", [], ev.duration_beats))
+                        notes_in_tuplet.append(("rest", [], ev.duration_beats, tied_from_prev))
             if notes_in_tuplet:
-                # 均分为 default；(notes)_：每个音为八分（四分除以2）；(notes)n：显式 n
+                # 均分为 default；(notes)_：每个音为八分；(notes)n：显式 n
                 if not has_explicit_n:
                     n_val = len(notes_in_tuplet)
                 if apply_underscore:
                     each = base_duration / 2  # _ 等同于填写2，四分除以2=八分
                 else:
                     each = base_duration / n_val
-                for kind, midis, _ in notes_in_tuplet:
+                # 连续连音线 ~3. ~3. 时，第一个 ~ 需连到括号前音符
+                prev_ev: NoteEvent | ChordEvent | None = current_bar.events[-1] if current_bar.events else None
+                for kind, midis, _, tied_from_prev in notes_in_tuplet:
                     if kind == "rest":
                         current_bar.events.append(RestEvent(duration_beats=each))
+                        prev_ev = None
                     else:
                         midis = add_harmony(midis, harmony, i)
+                        if tied_from_prev and prev_ev is not None:
+                            prev_ev.tied_to_next = True
                         if kind == "chord":
-                            current_bar.events.append(ChordEvent(midis=midis, duration_beats=each, volume=volume))
+                            ev = ChordEvent(midis=midis, duration_beats=each, volume=volume, tied_from_prev=tied_from_prev)
+                            current_bar.events.append(ev)
+                            prev_ev = ev
                         elif len(midis) == 1:
-                            current_bar.events.append(NoteEvent(midi=midis[0], duration_beats=each, volume=volume))
+                            ev = NoteEvent(midi=midis[0], duration_beats=each, volume=volume, tied_from_prev=tied_from_prev)
+                            current_bar.events.append(ev)
+                            prev_ev = ev
                         else:
-                            current_bar.events.append(ChordEvent(midis=midis, duration_beats=each, volume=volume))
+                            ev = ChordEvent(midis=midis, duration_beats=each, volume=volume, tied_from_prev=tied_from_prev)
+                            current_bar.events.append(ev)
+                            prev_ev = ev
                     bar_beats += each
             continue
         # 8 重复上小节（可跨篇章使用上一篇章最后一小节）

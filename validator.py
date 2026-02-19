@@ -5,7 +5,23 @@
 import re
 from dataclasses import dataclass
 
-from parser import parse as _parse, ParseError, ParsedScore
+from parser import parse as _parse, ParseError, ParsedScore, _strip_comments
+
+
+def _build_stripped_to_raw_mapping(raw_text: str) -> list[int]:
+    """构建 stripped 位置到 raw 位置的映射。stripped 与 parser 去注释后一致。"""
+    mapping: list[int] = []
+    i = 0
+    while i < len(raw_text):
+        if i + 1 < len(raw_text) and raw_text[i : i + 2] == "//":
+            while i < len(raw_text) and raw_text[i] != "\n":
+                i += 1
+            if i < len(raw_text):
+                i += 1
+            continue
+        mapping.append(i)
+        i += 1
+    return mapping
 
 
 @dataclass
@@ -270,7 +286,20 @@ def validate(text: str) -> tuple[ParsedScore | None, list[Diagnostic]]:
         return None, diags
 
     if score:
-        diags.extend(_check_bar_duration(text, score))
+        stripped = _strip_comments(text)
+        mapping = _build_stripped_to_raw_mapping(text)
+        bar_diags = _check_bar_duration(stripped, score)
+        for d in bar_diags:
+            if d.start_pos is not None and d.start_pos < len(mapping):
+                d.start_pos = mapping[d.start_pos]
+            if d.end_pos is not None:
+                if 0 < d.end_pos <= len(mapping):
+                    d.end_pos = mapping[d.end_pos - 1] + 1
+                elif d.end_pos > len(mapping):
+                    d.end_pos = len(text)
+            if d.start_pos is not None:
+                d.line, d.column = _pos_to_line_col(text, d.start_pos)
+        diags.extend(bar_diags)
         conn_diags, connected = _check_voicevox_connection(text)
         diags.extend(conn_diags)
         if connected:
