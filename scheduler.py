@@ -83,8 +83,20 @@ def _merge_tied_events(
                     break
                 else:
                     break
-            # 和弦整体：各音相同时值
-            result.append((start_beat, ev.duration_beats, list(ev.midis), vol, False))
+            # 琶音 [a]：从低到高快速连续，同时终止
+            arpeggio = getattr(ev, "arpeggio", False) and len(ev.midis) > 1
+            if arpeggio:
+                delay_beats = 0.05  # 每音间隔约 50ms @ 120bpm
+                sorted_midis = sorted(ev.midis)
+                n = len(sorted_midis)
+                for i, m in enumerate(sorted_midis):
+                    note_start = start_beat + i * delay_beats
+                    note_dur = ev.duration_beats - (n - 1 - i) * delay_beats
+                    if note_dur > 0:
+                        result.append((note_start, note_dur, [m], vol, False))
+            else:
+                # 和弦整体：各音相同时值
+                result.append((start_beat, ev.duration_beats, list(ev.midis), vol, False))
             # 连音延续：仅被 tie 的音，从和弦结束后开始，标记 is_continuation
             for m in ev.midis:
                 if merge_dur_by_midi[m] > 0:
