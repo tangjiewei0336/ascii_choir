@@ -1,3 +1,7 @@
 /__pycache__
 .tts_tmp.mp3
 workspaces/**/.ascii_choir_breakpoints.json
+**/.DS_Store
+.DS_Store
+sound_library/*.py
+sound_library/*.sh
