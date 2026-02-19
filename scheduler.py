@@ -21,17 +21,19 @@ class ScheduledNote:
     midis: list[int]
     volume: float = 0.6
     part_index: int = 0  # 声部索引，用于歌词合成时筛选旋律
+    is_continuation: bool = False  # 连音延续，不重新触发，需与前一音合并
+    instrument: str = "grand_piano"  # 音色，由 [cello][guitar] 等标记指定
 
 
 def _merge_tied_events(
     events_with_start: list[tuple[float, "NoteEvent | ChordEvent | RestEvent"]],
-) -> list[tuple[float, float, list[int], float]]:
+) -> list[tuple[float, float, list[int], float, bool]]:
     """
-    合并连音事件，返回 [(start_beat, duration, midis, volume), ...]。
+    合并连音事件，返回 [(start_beat, duration, midis, volume, is_continuation), ...]。
     播放时连音为一个持续音，不重复触发。
-    支持跨小节、单音连音、和弦连音（按音高分别合并，如 1/3 ~ 3/5）。
+    和弦内各音保持相同时值；连音延续单独输出并标记 is_continuation，由播放器合并。
     """
-    result: list[tuple[float, float, list[int], float]] = []
+    result: list[tuple[float, float, list[int], float, bool]] = []
     i = 0
     while i < len(events_with_start):
         start_beat, ev = events_with_start[i]
@@ -41,42 +43,68 @@ def _merge_tied_events(
         if isinstance(ev, NoteEvent):
             dur = ev.duration_beats
             vol = ev.volume
-            if getattr(ev, "tied_to_next", False) and i + 1 < len(events_with_start):
-                nxt_start, nxt = events_with_start[i + 1]
+            j = i + 1
+            while getattr(ev, "tied_to_next", False) and j < len(events_with_start):
+                nxt_start, nxt = events_with_start[j]
                 if getattr(nxt, "tied_from_prev", False) and isinstance(nxt, NoteEvent) and nxt.midi == ev.midi:
                     dur += nxt.duration_beats
-                    i += 1
-            result.append((start_beat, dur, [ev.midi], vol))
-            i += 1
+                    j += 1
+                else:
+                    break
+            result.append((start_beat, dur, [ev.midi], vol, False))
+            i = j
             continue
         if isinstance(ev, ChordEvent):
             vol = ev.volume
-            nxt_dur = 0.0
-            nxt_midis: list[int] = []
-            tied_midis: list[int] = []
-            if getattr(ev, "tied_to_next", False) and i + 1 < len(events_with_start):
-                _, nxt = events_with_start[i + 1]
-                if getattr(nxt, "tied_from_prev", False):
-                    tied_midis = getattr(nxt, "tied_from_prev_midis", [])
-                    if isinstance(nxt, ChordEvent):
-                        nxt_dur = nxt.duration_beats
-                        nxt_midis = nxt.midis
-                    elif isinstance(nxt, NoteEvent):
-                        nxt_dur = nxt.duration_beats
-                        nxt_midis = [nxt.midi]
-            # 按音高分别输出：ev 中的音若在 nxt 的 tied_from_prev_midis 里则合并时长
+            merge_dur_by_midi: dict[int, float] = {m: 0.0 for m in ev.midis}
+            extra_notes: list[tuple[float, float, int]] = []
+            j = i + 1
+            while getattr(ev, "tied_to_next", False) and j < len(events_with_start):
+                nxt_start, nxt = events_with_start[j]
+                if not getattr(nxt, "tied_from_prev", False):
+                    break
+                if isinstance(nxt, NoteEvent):
+                    if nxt.midi in ev.midis:
+                        merge_dur_by_midi[nxt.midi] += nxt.duration_beats
+                        j += 1
+                    else:
+                        extra_notes.append((nxt_start, nxt.duration_beats, nxt.midi))
+                        j += 1
+                elif isinstance(nxt, ChordEvent):
+                    tied_midis = getattr(nxt, "tied_from_prev_midis", []) or [
+                        m for m in nxt.midis if m in ev.midis
+                    ]
+                    for m in ev.midis:
+                        if m in tied_midis:
+                            merge_dur_by_midi[m] += nxt.duration_beats
+                    for m in nxt.midis:
+                        if m not in ev.midis:
+                            extra_notes.append((nxt_start, nxt.duration_beats, m))
+                    j += 1
+                    break
+                else:
+                    break
+            # 琶音 [a]：从低到高快速连续，同时终止
+            arpeggio = getattr(ev, "arpeggio", False) and len(ev.midis) > 1
+            if arpeggio:
+                delay_beats = 0.05  # 每音间隔约 50ms @ 120bpm
+                sorted_midis = sorted(ev.midis)
+                n = len(sorted_midis)
+                for i, m in enumerate(sorted_midis):
+                    note_start = start_beat + i * delay_beats
+                    note_dur = ev.duration_beats - (n - 1 - i) * delay_beats
+                    if note_dur > 0:
+                        result.append((note_start, note_dur, [m], vol, False))
+            else:
+                # 和弦整体：各音相同时值
+                result.append((start_beat, ev.duration_beats, list(ev.midis), vol, False))
+            # 连音延续：仅被 tie 的音，从和弦结束后开始，标记 is_continuation
             for m in ev.midis:
-                d = ev.duration_beats
-                if m in tied_midis:
-                    d += nxt_dur
-                result.append((start_beat, d, [m], vol))
-            # nxt 中仅在后段出现的音（如 1/3 ~ 3/5 中的 5）
-            for m in nxt_midis:
-                if m not in ev.midis:
-                    result.append((start_beat + ev.duration_beats, nxt_dur, [m], vol))
-            if nxt_dur > 0:
-                i += 1  # 已合并，跳过 nxt
-            i += 1
+                if merge_dur_by_midi[m] > 0:
+                    result.append((start_beat + ev.duration_beats, merge_dur_by_midi[m], [m], vol, True))
+            for nxt_start, nxt_dur, m in extra_notes:
+                result.append((nxt_start, nxt_dur, [m], vol, False))
+            i = j
             continue
         i += 1
     return result
@@ -87,6 +115,7 @@ def _part_events_to_scheduled(
     bar_starts: list[float],
     beats_per_second: float,
     part_index: int = 0,
+    instrument: str = "grand_piano",
 ) -> list[ScheduledNote]:
     """将一声部的所有小节事件转为 ScheduledNote，跨小节连音已合并"""
     events_with_start: list[tuple[float, NoteEvent | ChordEvent | RestEvent]] = []
@@ -110,8 +139,10 @@ def _part_events_to_scheduled(
             midis=midis,
             volume=vol,
             part_index=part_index,
+            is_continuation=is_cont,
+            instrument=instrument,
         )
-        for start, dur, midis, vol in merged
+        for start, dur, midis, vol, is_cont in merged
     ]
 
 
@@ -164,6 +195,7 @@ def _collect_notes_from_aligned(
     default_beats_per_bar: float,
     stop_at_fine: bool = False,
     stop_at_dc: bool = False,
+    section_part_instruments: dict[int, str] | None = None,
 ) -> tuple[list[ScheduledNote], float, bool, bool]:
     """
     从对齐的小节列表收集音符。按声部合并跨小节连音后调度。
@@ -202,8 +234,9 @@ def _collect_notes_from_aligned(
     notes: list[ScheduledNote] = []
     for part_idx in range(num_parts):
         part_bars = [row[part_idx] for row in bars_to_process]
+        inst = (section_part_instruments or {}).get(part_idx, "grand_piano")
         part_notes = _part_events_to_scheduled(
-            part_bars, bar_starts[:-1], beats_per_second, part_index=part_idx
+            part_bars, bar_starts[:-1], beats_per_second, part_index=part_idx, instrument=inst
         )
         notes.extend(part_notes)
     return notes, global_beat, hit_fine, hit_dc
@@ -222,6 +255,8 @@ def schedule(score: ParsedScore) -> list[ScheduledNote]:
                 midis=n.midis,
                 volume=n.volume,
                 part_index=n.part_index,
+                is_continuation=getattr(n, "is_continuation", False),
+                instrument=getattr(n, "instrument", "grand_piano"),
             ))
         if seg.notes:
             t_offset += max(n.start_time + n.duration for n in seg.notes)
@@ -255,14 +290,24 @@ def schedule_segments(score: ParsedScore) -> list[ScheduledSegment]:
 
         beats_per_second = bpm / 60.0
         aligned = _align_parts(section)
+        section_part_instruments = (
+            score.section_part_instruments[sec_idx]
+            if hasattr(score, "section_part_instruments") and sec_idx < len(getattr(score, "section_part_instruments", []))
+            else None
+        )
         notes1, next_beat, hit_fine, hit_dc = _collect_notes_from_aligned(
             aligned, global_beat, beats_per_second, default_beats_per_bar,
             stop_at_fine=False, stop_at_dc=True,
+            section_part_instruments=section_part_instruments,
         )
         # 音符的 start_time 转为相对于本篇章开始（0）
         seg_start = global_beat / beats_per_second
         rel_notes = [
-            ScheduledNote(n.start_time - seg_start, n.duration, n.midis, n.volume, n.part_index)
+            ScheduledNote(
+                n.start_time - seg_start, n.duration, n.midis, n.volume, n.part_index,
+                is_continuation=getattr(n, "is_continuation", False),
+                instrument=getattr(n, "instrument", "grand_piano"),
+            )
             for n in notes1
         ]
         segments.append(ScheduledSegment(tts_before=tts_before, notes=rel_notes, section_index=sec_idx))
@@ -282,11 +327,19 @@ def schedule_segments(score: ParsedScore) -> list[ScheduledSegment]:
                     bps = score.settings.bpm / 60.0
                     def_beats = 4.0 if score.settings.no_bar_check else float(score.settings.beat_numerator)
                 aligned = _align_parts(sec)
+                sec_inst = score.section_part_instruments[s_idx] if hasattr(score, "section_part_instruments") and s_idx < len(getattr(score, "section_part_instruments", [])) else None
                 nd, next_b, hit_f, _ = _collect_notes_from_aligned(
-                    aligned, dc_beat, bps, def_beats, stop_at_fine=True
+                    aligned, dc_beat, bps, def_beats, stop_at_fine=True,
+                    section_part_instruments=sec_inst,
                 )
                 seg_s = dc_beat / bps
-                rel = [ScheduledNote(n.start_time - seg_s, n.duration, n.midis, n.volume, n.part_index) for n in nd]
+                rel = [
+                    ScheduledNote(n.start_time - seg_s, n.duration, n.midis, n.volume, n.part_index,
+                        is_continuation=getattr(n, "is_continuation", False),
+                        instrument=getattr(n, "instrument", "grand_piano"),
+                    )
+                    for n in nd
+                ]
                 dc_segments.append(ScheduledSegment(tts_before=tts, notes=rel, section_index=s_idx))
                 dc_beat = next_b
                 if hit_f:

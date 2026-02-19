@@ -23,7 +23,9 @@ from parser import parse
 from player import Player
 from preprocessor import expand_imports
 from renderer import render_to_image, render_to_pil
-from validator import validate
+from validator import validate, VOICEVOX_UNREACHABLE_MSG
+from breakpoints import load_breakpoints, save_breakpoints, rename_breakpoints
+from voicevox_client import VOICEVOX_BASE
 
 
 def show_error_detail(parent: tk.Tk, title: str, message: str, traceback_str: str | None = None) -> None:
@@ -129,14 +131,14 @@ def _is_dark_mode() -> bool:
     return False
 
 
-DEFAULT_NEW_FILE = r"""\tonality{1}
+DEFAULT_NEW_FILE = r"""\tonality{0}
 \beat{4/4}
 \bpm{120}
 
 """
 
 # 示例简谱
-SAMPLE_SCORE = r"""\tonality{1}
+SAMPLE_SCORE = r"""\tonality{0}
 \beat{4/4}
 \bpm{120}
 
@@ -150,7 +152,7 @@ SAMPLE_NO_BAR = r"""\no_bar_check
 """
 # \no_bar_check 时禁用小节号检查，beat 无效，适合自由记谱
 
-SAMPLE_MULTI = r"""\tonality{1}
+SAMPLE_MULTI = r"""\tonality{0}
 \beat{4/4}
 \bpm{30}
 
@@ -184,7 +186,7 @@ SAMPLE_KEY_CHANGE = r"""\tonality{C}
 |1 2 3 4|5 4 3 2|1 - - -|0 - - - |
 """
 
-SAMPLE_AUTO_HARMONY = r"""\tonality{1}
+SAMPLE_AUTO_HARMONY = r"""\tonality{0}
 \beat{4/4}
 \bpm{60}
 
@@ -192,7 +194,7 @@ SAMPLE_AUTO_HARMONY = r"""\tonality{1}
 |1 0 (.5/1 .7/2 1/3 2/4)_| ~2/4 1/3 .7/2 (.5/1 .5/1)_| ~.5/1 - - -|
 """
 
-SAMPLE_HARMONY = r"""\tonality{1}
+SAMPLE_HARMONY = r"""\tonality{0}
 \beat{4/4}
 \bpm{60}
 
@@ -309,6 +311,10 @@ class App:
         tts_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="TTS", menu=tts_menu)
         tts_menu.add_command(label="VOICEVOX 音色选择...", command=self._on_voicevox_voices)
+
+        instrument_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="乐器", menu=instrument_menu)
+        instrument_menu.add_command(label="乐器面板...", command=self._on_instrument_panel)
         
         self.root.bind("<Control-n>", lambda e: self._on_new())
         self.root.bind("<Control-o>", lambda e: self._on_open())
@@ -604,6 +610,15 @@ class App:
         except ImportError as e:
             import traceback
             show_error_detail(self.root, "错误", f"无法加载 VOICEVOX 模块: {e}", traceback.format_exc())
+
+    def _on_instrument_panel(self):
+        """打开乐器面板对话框"""
+        try:
+            from instrument_dialog import show_instrument_dialog
+            show_instrument_dialog(self.root)
+        except ImportError as e:
+            import traceback
+            show_error_detail(self.root, "错误", f"无法加载乐器面板: {e}", traceback.format_exc())
     
     def _on_open_workspace(self):
         default_dir = WORKSPACES_DIR
@@ -624,6 +639,9 @@ class App:
             self.text.insert(tk.END, content)
             self.current_file_path = path
             self.root.title(f"简谱演奏 - {path.name}")
+            base = self._get_breakpoint_base_dir()
+            self._breakpoints = set(load_breakpoints(base, path.name)) if base else set()
+            self._clamp_breakpoints_to_line_count(len(content.splitlines()))
             self._do_highlights()
             self._highlight_current_file_in_workspace()
             self.root.after(100, self._update_preview)
@@ -635,8 +653,12 @@ class App:
         try:
             content = self.text.get(1.0, tk.END)
             path.write_text(content, encoding="utf-8")
+            prev_path = self.current_file_path
             self.current_file_path = path
             self.root.title(f"简谱演奏 - {path.name}")
+            if prev_path != path:
+                base = self._get_breakpoint_base_dir()
+                self._breakpoints = set(load_breakpoints(base, path.name)) if base else set()
             if not silent:
                 self.status_label.config(text="已保存")
                 self.root.after(2000, lambda: self.status_label.config(text="就绪"))
@@ -778,8 +800,12 @@ class App:
             return
         try:
             old_path.rename(new_path)
+            base = self._get_breakpoint_base_dir()
+            if base:
+                rename_breakpoints(base, old_path.name, new_path.name)
             if self.current_file_path == old_path:
                 self.current_file_path = new_path
+                self._breakpoints = set(load_breakpoints(base, new_path.name)) if base else set()
                 self.root.title(f"简谱演奏 - {new_path.name}")
             self._refresh_workspace_list()
             self.status_label.config(text="已重命名")
@@ -874,6 +900,8 @@ class App:
         
         self.btn_play = ttk.Button(toolbar, text="▶ 播放", command=self._on_play)
         self.btn_play.pack(side=tk.LEFT, padx=(0, 5))
+        self.btn_play_segment = ttk.Button(toolbar, text="▶ A-B 区间", command=self._on_play_segment)
+        self.btn_play_segment.pack(side=tk.LEFT, padx=(0, 5))
         
         self.btn_stop = ttk.Button(toolbar, text="■ 停止", command=self._on_stop, state=tk.DISABLED)
         self.btn_stop.pack(side=tk.LEFT, padx=(0, 5))
@@ -887,7 +915,9 @@ class App:
 
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
 
-        ttk.Button(toolbar, text="VOICEVOX 音色", command=self._on_voicevox_voices).pack(side=tk.LEFT, padx=(0, 5))
+        self.btn_voicevox = ttk.Button(toolbar, text="VOICEVOX 音色", command=self._on_voicevox_voices)
+        self.btn_voicevox.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(toolbar, text="乐器面板", command=self._on_instrument_panel).pack(side=tk.LEFT, padx=(0, 5))
         
         ttk.Button(toolbar, text="打开示例工作区", command=self._on_open_example_workspace).pack(side=tk.LEFT, padx=(0, 5))
         
@@ -911,12 +941,39 @@ class App:
         self.status_bar = ttk.Label(self.status_frame, text="行: 1  列: 1  |  总拍: —  小节: —")
         self.status_bar.pack(side=tk.RIGHT)
         
-        # 编辑区
+        # 编辑区（左侧行号 + 正文）
         ttk.Label(main, text="简谱输入（支持 \\tonality、\\beat、\\bpm、\\no_bar_check）:").pack(anchor=tk.W)
         colors = self._theme_colors()
+        editor_frame = ttk.Frame(main)
+        editor_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        gutter_bg = "#e0e0e0" if not self._dark_mode else "#252525"
+        line_num_bg = "#e8e8e8" if not self._dark_mode else "#2d2d2d"
+        self._breakpoint_gutter = tk.Canvas(
+            editor_frame,
+            width=18,
+            highlightthickness=0,
+            bg=gutter_bg,
+        )
+        self._breakpoint_gutter.pack(side=tk.LEFT, fill=tk.Y)
+        self._breakpoint_gutter.bind("<Button-1>", self._on_breakpoint_click)
+        self._breakpoint_gutter.bind("<Motion>", self._on_breakpoint_motion)
+        self._breakpoint_gutter.bind("<Leave>", self._on_breakpoint_leave)
+        self._bp_tooltip: tk.Toplevel | None = None
+        self._bp_tooltip_after_id: str | None = None
+        self._text_tooltip: tk.Toplevel | None = None
+        self._text_tooltip_after_id: str | None = None
+        self._text_tooltip_voice_id: int = -1
+        self._breakpoints: set[int] = set()  # 当前文件的断点行号
+        self._line_numbers = tk.Canvas(
+            editor_frame,
+            width=42,
+            highlightthickness=0,
+            bg=line_num_bg,
+        )
+        self._line_numbers.pack(side=tk.LEFT, fill=tk.Y)
         # 等宽字体 + 不换行，便于 Ctrl+F 小节对齐
         self.text = scrolledtext.ScrolledText(
-            main,
+            editor_frame,
             wrap=tk.NONE,
             font=_mono_font(12),
             height=20,
@@ -928,8 +985,25 @@ class App:
         )
         hscroll = tk.Scrollbar(main, orient=tk.HORIZONTAL, command=self.text.xview)
         self.text.configure(xscrollcommand=hscroll.set)
-        self.text.pack(fill=tk.BOTH, expand=True, pady=5)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         hscroll.pack(fill=tk.X)
+        # 行号与正文同步滚动
+        _orig_yview = self.text.yview
+        def _yview_wrapper(*args):
+            _orig_yview(*args)
+            self._redraw_line_numbers()
+            self._redraw_breakpoints()
+        self.text.vbar.configure(command=_yview_wrapper)
+        def _schedule_redraw(*args):
+            self.root.after(10, self._redraw_line_numbers)
+            self.root.after(10, self._redraw_breakpoints)
+        self.text.bind("<Button-1>", _schedule_redraw)
+        self.text.bind("<Configure>", lambda e: self._redraw_line_numbers())
+        self.text.bind("<MouseWheel>", _schedule_redraw)
+        self.text.bind("<Button-4>", _schedule_redraw)  # Linux 滚轮上
+        self.text.bind("<Button-5>", _schedule_redraw)  # Linux 滚轮下
+        self.text.bind("<Motion>", self._on_text_motion)
+        self.text.bind("<Leave>", self._on_text_leave)
 
         # 实时预览面板（带歌词简谱）
         self._preview_frame = ttk.LabelFrame(main, text="带歌词简谱预览", padding=5)
@@ -1003,18 +1077,21 @@ class App:
         self._diag_list = tk.Listbox(
             self._diag_content_frame,
             height=4,
-            font=_mono_font(10),
+            font=_mono_font(14),
             selectmode=tk.SINGLE,
         )
-        self._diag_list.bind("<Double-Button-1>", self._on_diag_select)
+        self._diag_list.bind("<Button-1>", self._on_diag_select)
         diag_scroll = ttk.Scrollbar(self._diag_content_frame, orient=tk.VERTICAL, command=self._diag_list.yview)
         self._diag_list.configure(yscrollcommand=diag_scroll.set)
         self._diag_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         diag_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         for i, c in enumerate(colors["bracket"]):
             self.text.tag_configure(f"bracket{i}", background=c)
-        self.text.tag_configure("diag_error", underline=True, underlinefg="#c55")
-        self.text.tag_configure("diag_warning", underline=True, underlinefg="#c9a227")
+        # 用背景色表示错误/警告，避免与下划线字符 _ 重叠
+        err_bg = "#ffcccc" if not self._dark_mode else "#5c2a2a"
+        warn_bg = "#fff3cd" if not self._dark_mode else "#4a4020"
+        self.text.tag_configure("diag_error", background=err_bg)
+        self.text.tag_configure("diag_warning", background=warn_bg)
         self.text.tag_configure("comment", foreground="#2d5a2d" if not self._dark_mode else "#5a8a5a")
         self._bar_check_enabled = True  # \no_bar_check 时可关闭
         self._highlight_timer = None
@@ -1026,7 +1103,7 @@ class App:
         hint_bg = "#2d2d2d" if self._dark_mode else "#f0f0f0"
         self.hint = tk.Label(
             main,
-            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线(可跨小节), # b ^ 升降还原, [xxx](...) 记号, [dc][fine] 反复, // 单行注释, \\tts{文本}{zh/ja/en}{voice_id} 篇章间语音(voice_id用VOICEVOX), \\lyrics{字/字}{part}{voice_id}{melody} 歌词(melody:0第一音1第二音), 1(啊) 行内歌词, \\import{文件名} 导入 | 文件→导出带歌词简谱(JPG) | Ctrl+F 对齐 | 括号高亮",
+            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线, # b ^ 升降还原, [cello][guitar] 音色, [xxx](...) 记号, [dc][fine] 反复, // 单行注释, \\tts{文本}{zh/ja/en}{voice_id} 篇章间语音, \\lyrics{字/字}{part}{voice_id}{melody} 歌词, 1(啊) 行内歌词, \\import{文件名} 导入 | 文件→导出带歌词简谱(JPG) | Ctrl+F 对齐 | 括号高亮",
             font=("", 9),
             fg=colors["hint_fg"],
             bg=hint_bg,
@@ -1113,8 +1190,14 @@ class App:
                             in_notation_scope = False
                         cur.append(c)
                     elif c == "|":
-                        parts.append("".join(cur))
-                        cur = []
+                        if cur and cur[-1] == ":":
+                            cur.append(c)
+                        elif i + 1 < n and s[i + 1] == ":":
+                            parts.append("".join(cur))
+                            cur = [c]
+                        else:
+                            parts.append("".join(cur))
+                            cur = []
                     else:
                         cur.append(c)
                     i += 1
@@ -1133,8 +1216,15 @@ class App:
                     depth -= 1
                     cur.append(c)
                 elif c == "|" and depth == 0:
-                    parts.append("".join(cur))
-                    cur = []
+                    # 不拆分重复记号：:| 的 | 属于前一 bar；|: 的 | 属于下一 bar
+                    if cur and cur[-1] == ":":
+                        cur.append(c)  # :| 保持在一起
+                    elif i + 1 < n and s[i + 1] == ":":
+                        parts.append("".join(cur))
+                        cur = [c]  # |: 的 | 归入下一 bar
+                    else:
+                        parts.append("".join(cur))
+                        cur = []
                 else:
                     cur.append(c)
                 i += 1
@@ -1143,9 +1233,16 @@ class App:
                 parts.append("".join(cur))
             prefix = parts[0].rstrip() if parts else ""
             suffix = ""
-            if len(parts) >= 2 and "](|" in (parts[0] if parts else "") and parts[-1].strip() == ")":
-                suffix = ")"
-                bars = [p.strip() for p in parts[1:-1]]
+            if len(parts) >= 2 and "](|" in s:
+                if parts[-1].strip() == ")":
+                    suffix = ")"
+                    bars = [p.strip() for p in parts[1:-1]]
+                elif parts[-1].rstrip().endswith(")"):
+                    suffix = ")"
+                    last_bar = parts[-1].rstrip()[:-1].rstrip()
+                    bars = [p.strip() for p in parts[1:-1]] + [last_bar]
+                else:
+                    bars = [p.strip() for p in parts[1:] if p.strip()]
             else:
                 bars = [p.strip() for p in parts[1:] if p.strip()]
             return prefix, bars, suffix
@@ -1163,6 +1260,11 @@ class App:
                 while len(bars) < max_bars:
                     bars.append("")
             col_widths = [max(max(len(bars[j]) for _, bars, _ in all_data), 1) for j in range(max_bars)]
+            # 前缀（含 [8va] 等记号）需对齐，使小节号 | 起始列一致
+            max_prefix_len = 0
+            for prefix, bars, suffix in all_data:
+                sep = " |" if prefix.rstrip().endswith("&") else "|"
+                max_prefix_len = max(max_prefix_len, len(prefix.rstrip()) + len(sep))
             result = []
             for (_, line), (prefix, bars, suffix) in zip(part_lines, all_data):
                 if not bars and max_bars > 0:
@@ -1170,7 +1272,8 @@ class App:
                     continue
                 padded = [b.ljust(col_widths[j]) for j, b in enumerate(bars)]
                 sep = " |" if prefix.rstrip().endswith("&") else "|"
-                result.append(prefix.rstrip() + sep + "|".join(padded) + suffix)
+                before_bars = (prefix.rstrip() + sep).ljust(max_prefix_len)
+                result.append(before_bars + "|".join(padded) + suffix)
             return result
         
         new_sections: list[list[str]] = []
@@ -1184,9 +1287,10 @@ class App:
                     split_at = 1
                     for k in range(1, n_bars + 1):
                         ok = True
-                        for prefix, bars in all_data:
+                        for prefix, bars, suffix in all_data:
                             seg = bars[:k]
-                            test_len = len(prefix) + 2 + sum(len(b) + 1 for b in seg)
+                            sep = " |" if prefix.rstrip().endswith("&") else "|"
+                            test_len = len(prefix.rstrip()) + len(sep) + sum(len(b) + 1 for b in seg) - (1 if seg else 0)
                             if test_len > max_chars:
                                 ok = False
                                 break
@@ -1226,6 +1330,7 @@ class App:
             new_content = "\n".join(header_lines).rstrip() + "\n\n" + new_content
         self.text.delete(1.0, tk.END)
         self.text.insert(tk.END, new_content)
+        self._clamp_breakpoints_to_line_count(len(new_content.splitlines()))
         return "break"
     
     def _highlight_brackets(self):
@@ -1271,6 +1376,374 @@ class App:
             tag_idx = min(level, len(colors) - 1)
             self.text.tag_add(f"bracket{tag_idx}", f"1.0+{start}c", f"1.0+{end}c")
     
+    def _redraw_line_numbers(self):
+        """重绘左侧行号"""
+        try:
+            self._line_numbers.delete("all")
+            line_num_fg = "#606366" if not self._dark_mode else "#808080"
+            i = self.text.index("@0,0")
+            while True:
+                dline = self.text.dlineinfo(i)
+                if dline is None:
+                    break
+                y = dline[1]
+                linenum = str(i).split(".")[0]
+                self._line_numbers.create_text(
+                    38, y, anchor="ne", text=linenum, fill=line_num_fg, font=_mono_font(12)
+                )
+                i = self.text.index(f"{i}+1line")
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _get_breakpoint_base_dir(self) -> Path | None:
+        """返回断点存储的目录（工作区根或文件所在目录）"""
+        if self.workspace_root and self.workspace_root.is_dir():
+            return self.workspace_root
+        if self.current_file_path:
+            return self.current_file_path.parent
+        return None
+
+    def _clamp_breakpoints_to_line_count(self, line_count: int) -> None:
+        """移除超出文件行数的断点，避免断点行被删后无法添加 B 点"""
+        if line_count <= 0:
+            return
+        invalid = {ln for ln in self._breakpoints if ln > line_count or ln < 1}
+        if invalid:
+            self._breakpoints -= invalid
+            self._save_breakpoints()
+            self._redraw_breakpoints()
+
+    def _breakpoint_line_at_y(self, y: float) -> int | None:
+        """返回 y 坐标对应的行号，若不在任一行则返回 None"""
+        try:
+            i = self.text.index("@0,0")
+            while True:
+                dline = self.text.dlineinfo(i)
+                if dline is None:
+                    return None
+                _, dy, _, h = dline[:4]
+                if dy <= y < dy + h:
+                    return int(str(i).split(".")[0])
+                i = self.text.index(f"{i}+1line")
+        except (tk.TclError, ValueError):
+            return None
+
+    def _on_breakpoint_click(self, event) -> None:
+        """断点 gutter 点击：切换该行断点，最多 2 个（A、B 区间）"""
+        line_no = self._breakpoint_line_at_y(event.y)
+        if line_no is None:
+            return
+        if line_no in self._breakpoints:
+            self._breakpoints.discard(line_no)
+        else:
+            if len(self._breakpoints) >= 2:
+                # 移除第一个（A），新行成为 A
+                first = min(self._breakpoints)
+                self._breakpoints.discard(first)
+            self._breakpoints.add(line_no)
+        self._save_breakpoints()
+        self._redraw_breakpoints()
+
+    def _on_breakpoint_motion(self, event) -> None:
+        """断点 gutter 悬浮：状态栏 + 淡色悬浮提示（防抖 400ms）"""
+        if self._bp_tooltip_after_id:
+            self.root.after_cancel(self._bp_tooltip_after_id)
+            self._bp_tooltip_after_id = None
+        line_no = self._breakpoint_line_at_y(event.y)
+        if line_no is None or line_no not in self._breakpoints:
+            self._hide_bp_tooltip()
+            self.status_label.config(text="点击行左侧设置 A、B 断点（最多 2 个）")
+            return
+        bp_list = sorted(self._breakpoints)
+        idx = bp_list.index(line_no)
+        label = "A" if idx == 0 else "B"
+        text = f"{label} 断点（第 {line_no} 行）"
+        self.status_label.config(text=text)
+        ev_x, ev_y = event.x, event.y
+
+        def _show():
+            self._bp_tooltip_after_id = None
+            self._show_bp_tooltip(ev_x, ev_y, text)
+
+        self._bp_tooltip_after_id = self.root.after(400, _show)
+
+    def _show_bp_tooltip(self, x: int, y: int, text: str) -> None:
+        """显示淡色悬浮断点提示"""
+        if self._bp_tooltip is None:
+            self._bp_tooltip = tk.Toplevel(self.root)
+            self._bp_tooltip.withdraw()
+            self._bp_tooltip.overrideredirect(True)
+            self._bp_tooltip.attributes("-topmost", True)
+            self._bp_tooltip_lbl = tk.Label(
+                self._bp_tooltip,
+                text="",
+                bg="#f0f4e8" if not self._dark_mode else "#3a4035",
+                fg="#333" if not self._dark_mode else "#ccc",
+                font=("", 10),
+                padx=8,
+                pady=4,
+                relief=tk.SOLID,
+                borderwidth=1,
+            )
+            self._bp_tooltip_lbl.pack()
+        self._bp_tooltip_lbl.config(text=text)
+        self._bp_tooltip.deiconify()
+        try:
+            rx = self._breakpoint_gutter.winfo_rootx() + x + 14
+            ry = self._breakpoint_gutter.winfo_rooty() + y + 4
+            self._bp_tooltip.geometry(f"+{rx}+{ry}")
+        except tk.TclError:
+            pass
+
+    def _hide_bp_tooltip(self) -> None:
+        """隐藏断点悬浮提示"""
+        if self._bp_tooltip_after_id:
+            try:
+                self.root.after_cancel(self._bp_tooltip_after_id)
+            except tk.TclError:
+                pass
+            self._bp_tooltip_after_id = None
+        if self._bp_tooltip is not None:
+            try:
+                self._bp_tooltip.withdraw()
+            except tk.TclError:
+                pass
+
+    def _on_breakpoint_leave(self, event) -> None:
+        """离开断点 gutter 时恢复状态栏并隐藏悬浮提示"""
+        self._hide_bp_tooltip()
+        if not self.is_playing:
+            self.status_label.config(text="就绪")
+        self._update_status_bar()
+
+    def _parse_hover_token(self, content: str, char_pos: int) -> tuple[str, int] | None:
+        """解析 char_pos 处的 token，返回 (提示文本, voice_id 或 -1)。"""
+        lines = content.split("\n")
+        offset = 0
+        for line in lines:
+            line_len = len(line) + 1
+            if offset <= char_pos < offset + len(line):
+                col = char_pos - offset
+                # \bpm{120} \tonality{0} \beat{4/4} \no_bar_check
+                for m in re.finditer(r"\\(bpm|tonality|beat|no_bar_check)\s*(\{[^}]*\})?", line, re.I):
+                    if m.start() <= col <= m.end():
+                        key = m.group(1).lower()
+                        if key == "bpm" and m.group(2):
+                            val = m.group(2)[1:-1]
+                            return (f"BPM: {val}", -1)
+                        if key == "tonality" and m.group(2):
+                            val = m.group(2)[1:-1]
+                            return (f"调性: {val}", -1)
+                        if key == "beat" and m.group(2):
+                            val = m.group(2)[1:-1]
+                            return (f"拍号: {val}", -1)
+                        if key == "no_bar_check":
+                            return ("禁用小节时值检查", -1)
+                        return (f"\\{key}", -1)
+                # \lyrics{...}{part}{voice_id}{melody} 或 \tts{...}{lang}{voice_id}
+                for m in re.finditer(r"\\lyrics\s*\{[^{}]*\}\s*\{[^{}]*\}\s*\{([^{}]+)\}", line, re.I):
+                    if m.start(1) <= col <= m.end(1):
+                        vid = m.group(1).strip()
+                        if vid.isdigit():
+                            return (f"歌词音色 ID: {vid}", int(vid))
+                for m in re.finditer(r"\\tts\s*\{[^{}]*\}\s*\{[^{}]*\}\s*\{([^{}]+)\}", line, re.I):
+                    if m.start(1) <= col <= m.end(1):
+                        vid = m.group(1).strip()
+                        if vid.isdigit():
+                            return (f"TTS 音色 ID: {vid}", int(vid))
+                break
+            offset += line_len
+        return None
+
+    def _on_text_motion(self, event) -> None:
+        """正文悬浮：\\bpm、\\tonality、\\beat、voice_id 等提示（防抖 500ms）"""
+        if self._text_tooltip_after_id:
+            self.root.after_cancel(self._text_tooltip_after_id)
+            self._text_tooltip_after_id = None
+        try:
+            idx = self.text.index(f"@{event.x},{event.y}")
+        except tk.TclError:
+            self._hide_text_tooltip()
+            return
+        content = self.text.get(1.0, tk.END)
+        char_pos = len(self.text.get(1.0, idx))
+        parsed = self._parse_hover_token(content, char_pos)
+        if parsed is None:
+            self._hide_text_tooltip()
+            return
+        text, voice_id = parsed
+
+        def _show():
+            self._text_tooltip_after_id = None
+            self._show_text_tooltip(event, text, voice_id)
+
+        self._text_tooltip_after_id = self.root.after(500, _show)
+
+    def _show_text_tooltip(self, event, text: str, voice_id: int) -> None:
+        """显示正文悬浮提示，voice_id>=0 时异步加载头像"""
+        self._text_tooltip_voice_id = voice_id
+        if self._text_tooltip is None:
+            self._text_tooltip = tk.Toplevel(self.root)
+            self._text_tooltip.withdraw()
+            self._text_tooltip.overrideredirect(True)
+            self._text_tooltip.attributes("-topmost", True)
+            self._text_tooltip_frame = tk.Frame(
+                self._text_tooltip,
+                bg="#f0f4e8" if not self._dark_mode else "#3a4035",
+                relief=tk.SOLID,
+                borderwidth=1,
+            )
+            self._text_tooltip_frame.pack()
+            self._text_tooltip_lbl = tk.Label(
+                self._text_tooltip_frame,
+                text="",
+                bg="#f0f4e8" if not self._dark_mode else "#3a4035",
+                fg="#333" if not self._dark_mode else "#ccc",
+                font=("", 10),
+                padx=8,
+                pady=4,
+            )
+            self._text_tooltip_lbl.pack()
+            self._text_tooltip_img = tk.Label(self._text_tooltip_frame, image="", bg="#f0f4e8" if not self._dark_mode else "#3a4035")
+        self._text_tooltip_img.pack_forget()
+        self._text_tooltip_lbl.config(text=text)
+        self._text_tooltip_lbl.pack()
+        try:
+            rx = self.text.winfo_rootx() + event.x + 16
+            ry = self.text.winfo_rooty() + event.y + 20
+            self._text_tooltip.deiconify()
+            self._text_tooltip.geometry(f"+{rx}+{ry}")
+        except tk.TclError:
+            return
+        if voice_id >= 0:
+            self._load_voice_avatar_async(voice_id, voice_id)
+
+    def _load_voice_avatar_async(self, style_id: int, request_id: int) -> None:
+        """后台加载 VOICEVOX 音色头像并更新 tooltip"""
+        cache = getattr(self, "_voice_avatar_cache", None)
+        if cache is None:
+            self._voice_avatar_cache = {}
+            cache = self._voice_avatar_cache
+        if style_id in cache:
+            self._update_tooltip_avatar(cache[style_id], style_id)
+            return
+
+        def _fetch():
+            try:
+                from voicevox_client import fetch_speakers, fetch_singers, fetch_speaker_info, resolve_speakers_style_id
+                base = VOICEVOX_BASE
+                singers = fetch_singers(base)
+                uuid_val = None
+                for s in singers:
+                    for st in s.get("styles", []):
+                        if st.get("id") == style_id:
+                            uuid_val = s.get("speaker_uuid") or s.get("uuid")
+                            break
+                    if uuid_val:
+                        break
+                if not uuid_val:
+                    speakers = fetch_speakers(base)
+                    for sp in speakers:
+                        for st in sp.get("styles", []):
+                            if st.get("id") == style_id:
+                                uuid_val = sp.get("speaker_uuid") or sp.get("uuid")
+                                break
+                        if uuid_val:
+                            break
+                if not uuid_val:
+                    return
+                from voicevox_client import resolve_speakers_style_id
+                match_id = resolve_speakers_style_id(style_id, base) or style_id
+                for fmt in ("url", "base64"):
+                    try:
+                        info = fetch_speaker_info(str(uuid_val), base, resource_format=fmt)
+                        portrait = None
+                        for si in info.get("style_infos") or []:
+                            if si.get("id") in (style_id, match_id) and si.get("portrait"):
+                                portrait = si["portrait"]
+                                break
+                        if not portrait:
+                            portrait = info.get("portrait") or ""
+                        if not portrait and info.get("style_infos"):
+                            portrait = info["style_infos"][0].get("portrait", "")
+                        if portrait:
+                            is_url = fmt == "url" and (portrait.startswith("http://") or portrait.startswith("https://"))
+                            from voicevox_voice_dialog import _load_portrait_image
+                            img = _load_portrait_image(portrait, is_url, (64, 64))
+                            if img:
+                                rid = request_id
+                                self.root.after(0, lambda i=img, r=rid: self._update_tooltip_avatar(i, r))
+                                self._voice_avatar_cache[style_id] = img
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _update_tooltip_avatar(self, photo: tk.PhotoImage, request_id: int) -> None:
+        """更新正文 tooltip 显示头像，仅当 request_id 与当前 tooltip 的 voice_id 一致时更新"""
+        if self._text_tooltip is None or not self._text_tooltip.winfo_viewable():
+            return
+        if getattr(self, "_text_tooltip_voice_id", -1) != request_id:
+            return
+        try:
+            self._text_tooltip_img.config(image=photo)
+            self._text_tooltip_img.image = photo
+            self._text_tooltip_img.pack(pady=(0, 4))
+        except tk.TclError:
+            pass
+
+    def _hide_text_tooltip(self) -> None:
+        """隐藏正文悬浮提示"""
+        self._text_tooltip_voice_id = -1
+        if self._text_tooltip_after_id:
+            try:
+                self.root.after_cancel(self._text_tooltip_after_id)
+            except tk.TclError:
+                pass
+            self._text_tooltip_after_id = None
+        if self._text_tooltip is not None:
+            try:
+                self._text_tooltip.withdraw()
+            except tk.TclError:
+                pass
+
+    def _on_text_leave(self, event) -> None:
+        """离开正文时隐藏悬浮提示"""
+        self._hide_text_tooltip()
+
+    def _save_breakpoints(self) -> None:
+        """将当前断点写入隐藏文件"""
+        base = self._get_breakpoint_base_dir()
+        if not base or not self.current_file_path:
+            return
+        save_breakpoints(base, self.current_file_path.name, list(self._breakpoints))
+
+    def _redraw_breakpoints(self) -> None:
+        """重绘断点 gutter，A 用红、B 用蓝区分"""
+        try:
+            self._breakpoint_gutter.delete("all")
+            bp_list = sorted(self._breakpoints)
+            color_a = "#c55" if not self._dark_mode else "#e66"
+            color_b = "#55c" if not self._dark_mode else "#66e"
+            i = self.text.index("@0,0")
+            while True:
+                dline = self.text.dlineinfo(i)
+                if dline is None:
+                    break
+                y = dline[1]
+                line_no = int(str(i).split(".")[0])
+                if line_no in self._breakpoints:
+                    idx = bp_list.index(line_no)
+                    color = color_a if idx == 0 else color_b
+                    cx, cy = 9, y + 8
+                    self._breakpoint_gutter.create_oval(cx - 5, cy - 5, cx + 5, cy + 5, fill=color, outline=color)
+                i = self.text.index(f"{i}+1line")
+        except (tk.TclError, AttributeError):
+            pass
+
     def _toggle_diagnostics(self):
         """折叠/展开错误与警告面板"""
         self._diag_expanded = not self._diag_expanded
@@ -1321,6 +1794,7 @@ class App:
 
     def _on_text_button_release(self, event=None):
         """处理输入框内点击/释放，更新状态栏；拖放由 _on_global_drop_check 处理"""
+        self.text.tag_raise("sel")  # 选区显示在高亮之上
         self._on_cursor_move(event)
 
     def _update_duration_buttons_state(self):
@@ -1374,6 +1848,9 @@ class App:
         self._cached_score = score
         self._diag_list.delete(0, tk.END)
         self._diag_data = diags
+        voicevox_unreachable = any(d.message == VOICEVOX_UNREACHABLE_MSG for d in diags)
+        if hasattr(self, "btn_voicevox"):
+            self.btn_voicevox.config(state=tk.DISABLED if voicevox_unreachable else tk.NORMAL)
         self._update_status_bar(score)
         for d in diags:
             icon = "✕" if d.level == "error" else "⚠"
@@ -1392,15 +1869,30 @@ class App:
                 self.text.tag_add(tag, f"1.0+{d.start_pos}c", f"1.0+{d.end_pos}c")
 
     def _on_diag_select(self, event=None):
-        """双击诊断项时跳转到对应行"""
-        sel = self._diag_list.curselection()
-        if not sel or not getattr(self, "_diag_data", None):
+        """点击诊断项时跳转到对应位置"""
+        if not getattr(self, "_diag_data", None):
             return
-        idx = sel[0]
+        if event is not None and event.widget == self._diag_list:
+            idx = self._diag_list.nearest(event.y)
+        else:
+            sel = self._diag_list.curselection()
+            if not sel:
+                return
+            idx = sel[0]
         if idx < len(self._diag_data):
             d = self._diag_data[idx]
-            self.text.see(f"{d.line}.{d.column}")
-            self.text.mark_set(tk.INSERT, f"{d.line}.{d.column}")
+            if d.start_pos is not None:
+                try:
+                    target = self.text.index(f"1.0+{d.start_pos}c")
+                    self.text.see(target)
+                    self.text.mark_set(tk.INSERT, target)
+                except tk.TclError:
+                    self.text.see(f"{d.line}.{d.column}")
+                    self.text.mark_set(tk.INSERT, f"{d.line}.{d.column}")
+            else:
+                self.text.see(f"{d.line}.{d.column}")
+                self.text.mark_set(tk.INSERT, f"{d.line}.{d.column}")
+            self.text.focus_set()
 
     def _highlight_comments(self):
         """// 单行注释显示为深绿色"""
@@ -1411,10 +1903,13 @@ class App:
             self.text.tag_add("comment", f"1.0+{start}c", f"1.0+{end}c")
 
     def _do_highlights(self):
-        """执行括号高亮、注释高亮、诊断波浪线（错误红/警告黄）"""
+        """执行括号高亮、注释高亮、诊断背景色（错误红/警告黄）、行号、断点"""
         self._highlight_brackets()
         self._highlight_comments()
         self._update_diagnostics()
+        self._redraw_line_numbers()
+        self._redraw_breakpoints()
+        self.text.tag_raise("sel")  # 选区显示在高亮之上
     
     def _on_key_release(self, event=None):
         if self._highlight_timer:
@@ -1478,6 +1973,66 @@ class App:
         self._preview_canvas.config(scrollregion=(0, 0, w, h))
         self._preview_canvas.create_image(0, 0, anchor=tk.NW, image=photo)
     
+    def _on_play_segment(self):
+        """从 A 断点播放到 B 断点"""
+        if self.is_playing:
+            return
+        bp_list = sorted(self._breakpoints)
+        if len(bp_list) < 2:
+            messagebox.showinfo("A-B 区间", "请设置 A、B 两个断点（点击行左侧，最多 2 个）")
+            return
+        start_line, end_line = bp_list[0], bp_list[1]
+        content = self.text.get(1.0, tk.END)
+        lines = content.split("\n")
+        # 收集 A 断点之前的 tonality、beat、bpm、no_bar_check 等全局设置
+        setting_pat = re.compile(r"\\tonality\{|\\beat\{|\\bpm\{|\\no_bar_check", re.I)
+        header_lines = [
+            ln for ln in lines[: start_line - 1]
+            if setting_pat.search(ln)
+        ]
+        segment_lines = lines[start_line - 1 : end_line - 1]
+        excerpt = "\n".join(header_lines + [""] + segment_lines) if header_lines else "\n".join(segment_lines)
+        if not excerpt.strip():
+            messagebox.showinfo("断点区间", "区间内无内容")
+            return
+        base_dir = (
+            self.workspace_root
+            if self.workspace_root and self.workspace_root.is_dir()
+            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+        )
+        try:
+            excerpt = expand_imports(excerpt, base_dir)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            import traceback
+            show_error_detail(self.root, "导入错误", str(e), traceback.format_exc())
+            return
+        self.is_playing = True
+        self.btn_play.config(state=tk.DISABLED)
+        self.btn_play_segment.config(state=tk.DISABLED)
+        self.btn_stop.config(state=tk.NORMAL)
+        self.progress_var.set(0)
+        self.status_label.config(text="播放 A-B 区间...")
+
+        def progress_cb(current: float, total: float):
+            if total > 0:
+                pct = current / total * 100
+                self.root.after(0, lambda: self.progress_var.set(pct))
+
+        self.player.set_progress_callback(progress_cb)
+
+        def run():
+            try:
+                self.player.play_score(excerpt)
+            except Exception as e:
+                import traceback
+                err_msg, tb = str(e), traceback.format_exc()
+                self.root.after(0, lambda: show_error_detail(self.root, "播放错误", err_msg, tb))
+            finally:
+                self.root.after(0, self._on_play_finished)
+
+        self.play_thread = threading.Thread(target=run, daemon=True)
+        self.play_thread.start()
+
     def _on_play(self):
         if self.is_playing:
             return
@@ -1515,8 +2070,8 @@ class App:
                 self.player.play_score(score)
             except Exception as e:
                 import traceback
-                tb = traceback.format_exc()
-                self.root.after(0, lambda: show_error_detail(self.root, "播放错误", str(e), tb))
+                err_msg, tb = str(e), traceback.format_exc()
+                self.root.after(0, lambda: show_error_detail(self.root, "播放错误", err_msg, tb))
             finally:
                 self.root.after(0, self._on_play_finished)
         
@@ -1526,6 +2081,7 @@ class App:
     def _on_play_finished(self):
         self.is_playing = False
         self.btn_play.config(state=tk.NORMAL)
+        self.btn_play_segment.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)
         self.progress_var.set(100)
         self.status_label.config(text="播放完成")

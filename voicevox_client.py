@@ -68,7 +68,7 @@ def _format_error(status: int, body: bytes, endpoint: str) -> str:
     if status == 502:
         msg += "\n\n502 常见原因：引擎未启动、已崩溃或代理异常。请确认 voicevox_engine 已运行，可访问 http://127.0.0.1:50021/docs 测试。"
     elif status == 500 and "sing" in endpoint.lower():
-        msg += "\n\n歌唱 API 500：所选音色可能不支持歌唱。仅 /singers 中的角色（如波音リツ）支持歌唱，程序会自动尝试使用歌唱角色。"
+        msg += "\n\n歌唱 API 500：BPM 过快时歌手可能唱不出来，可尝试降低 \\bpm 数值。"
     elif status in (0, -1) or "Connection" in body_str:
         msg += "\n\n请确认 voicevox_engine 已启动 (默认端口 50021)。"
     return msg
@@ -269,6 +269,49 @@ def resolve_singing_style_id(
     except Exception:
         pass
     return get_singing_style_id(base_url)
+
+
+def resolve_speakers_style_id(
+    singer_style_id: int,
+    base_url: str = VOICEVOX_BASE,
+) -> Optional[int]:
+    """
+    将 /singers 的 style_id 解析为 TTS API 可用的 style_id。
+    /audio_query 与 /synthesis 使用 /speakers 的 style_id。
+    若 singer_style_id 已在 /speakers 中则直接返回；否则按 speaker_uuid + 风格索引匹配。
+    """
+    try:
+        speakers = fetch_speakers(base_url)
+        for sp in speakers:
+            for st in sp.get("styles", []):
+                if st.get("id") == singer_style_id:
+                    return singer_style_id
+        singers = fetch_singers(base_url)
+        target_uuid: Optional[str] = None
+        style_idx = -1
+        for s in singers:
+            for i, st in enumerate(s.get("styles", [])):
+                if st.get("id") == singer_style_id:
+                    target_uuid = s.get("speaker_uuid") or s.get("uuid")
+                    style_idx = i
+                    break
+            if target_uuid is not None:
+                break
+        if not target_uuid or style_idx < 0:
+            return None
+        target_uuid_str = str(target_uuid)
+        for sp in speakers:
+            u = sp.get("speaker_uuid") or sp.get("uuid")
+            if u and str(u) == target_uuid_str:
+                styles = sp.get("styles", [])
+                if style_idx < len(styles):
+                    sid = styles[style_idx].get("id")
+                    if sid is not None:
+                        return sid
+                break
+    except Exception:
+        pass
+    return None
 
 
 def get_legal_info_for_speaker(speaker_name: str) -> str:

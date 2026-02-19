@@ -17,7 +17,7 @@ python main.py
 ## 支持功能
 
 ### 全局设定
-- `\tonality{1}` / `\tonality{bA}` - 调性
+- `\tonality{0}` / `\tonality{bA}` - 调性
 - `\beat{4/4}` / `\beat{c}` - 拍号
 - `\bpm{120}` - 速度
 - `\no_bar_check` - 禁用小节号检查，beat 无效
@@ -37,6 +37,7 @@ python main.py
 ### [] 记号（括号可跨小节）
 - 音量：`[fff]` `[f]` `[mp]` `[p]` 等
 - 八度：`[8vb](...)` `[8va](...)` `[15va](...)`
+- 琶音：`[a]` / `[arpeggio]` 快速连续弹奏，无括号作用于下一音，有括号作用于括号内所有音
 - 和声：`[+3]` `[-3]` `[+5]` `[-5]`（按音名往下/上数，不可用于含升降号的音符）
 - crescendo/decrescendo、deviation explicit
 - `[dc]` Da Capo 跳回开头，`[fine]` 结束

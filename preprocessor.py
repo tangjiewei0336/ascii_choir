@@ -4,15 +4,30 @@
 import re
 from pathlib import Path
 
+# 库扫描位置：workspaces/lib，\import 在 base_dir 未找到时会在此查找
+LIB_DIR = Path(__file__).resolve().parent / "workspaces" / "lib"
+
 
 def expand_imports(content: str, base_dir: Path | None) -> str:
     """
     将 content 中的 \\import{文件名} 替换为对应文件内容。
     支持递归导入；检测循环导入并抛出异常。
     base_dir: 解析相对路径的基准目录（通常为工作区根或当前文件所在目录）。
+    查找顺序：base_dir -> workspaces/lib
     """
     if base_dir is None or not base_dir.is_dir():
         return content
+
+    def _resolve_path(filename: str) -> Path:
+        """按 base_dir -> lib 顺序解析导入路径"""
+        p = (base_dir / filename).resolve()
+        if p.is_file():
+            return p
+        if LIB_DIR.is_dir():
+            p_lib = (LIB_DIR / filename).resolve()
+            if p_lib.is_file():
+                return p_lib
+        return p  # 返回原路径，让后续 read 抛 FileNotFoundError
 
     def _expand(text: str, visited: set[str]) -> str:
         pattern = re.compile(r"\\import\{([^{}]+)\}")
@@ -25,7 +40,7 @@ def expand_imports(content: str, base_dir: Path | None) -> str:
                 result.append(m.group(0))
                 last_end = m.end()
                 continue
-            resolved = (base_dir / filename).resolve()
+            resolved = _resolve_path(filename)
             try:
                 canon = str(resolved.resolve())
             except OSError:

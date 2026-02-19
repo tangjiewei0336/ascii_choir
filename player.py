@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from sound_loader import load_sound_library, get_default_sound_path
+from instrument_registry import get_instrument_path_for_note
 from scheduler import ScheduledNote, schedule, schedule_segments, ScheduledSegment
 from validator import parse
 
@@ -43,11 +44,21 @@ class Player:
         """设置进度回调 (current_time, total_duration)"""
         self._on_progress = callback
     
-    def _load_wav(self, midi: int) -> Optional[np.ndarray]:
-        """加载并缓存单个音色的 WAV，转为 mono float32"""
-        if midi in self._cache:
-            return self._cache[midi]
-        path = self.sound_map.get(midi)
+    def _load_wav(
+        self,
+        midi: int,
+        instrument: str = "grand_piano",
+        chord_midis: list[int] | None = None,
+    ) -> Optional[np.ndarray]:
+        """加载并缓存单个音色的 WAV，转为 mono float32。按 instrument 选择音色库。"""
+        lib_path = get_instrument_path_for_note(instrument, midi, chord_midis)
+        if not lib_path:
+            lib_path = get_default_sound_path()
+        cache_key = (lib_path, midi)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        sound_map = load_sound_library(lib_path)
+        path = sound_map.get(midi)
         if not path or not Path(path).exists():
             return None
         try:
@@ -60,16 +71,66 @@ class Player:
                 new_len = int(len(data) * ratio)
                 indices = np.linspace(0, len(data) - 1, new_len)
                 data = np.interp(indices, np.arange(len(data)), data)
-            self._cache[midi] = data
+            self._cache[cache_key] = data
             return data
         except Exception:
             return None
     
+    def _merge_continuation_notes(self, notes: list[ScheduledNote]) -> list[ScheduledNote]:
+        """
+        合并 is_continuation 事件：将连音延续与前一同音高音符合并，避免重复触发。
+        和弦内被 tie 的音会拆出单独延长，以保持和弦其他音相同时值。
+        """
+        result: list[ScheduledNote] = []
+        for n in notes:
+            if not getattr(n, "is_continuation", False) or len(n.midis) != 1:
+                result.append(n)
+                continue
+            midi = n.midis[0]
+            # 查找前一音符：结束时间等于本音符开始，且包含该 midi
+            merged = False
+            for i in range(len(result) - 1, -1, -1):
+                prev = result[i]
+                prev_end = prev.start_time + prev.duration
+                if abs(prev_end - n.start_time) > 1e-6:
+                    continue
+                if midi not in prev.midis:
+                    continue
+                # 找到：合并延续
+                merged = True
+                if len(prev.midis) == 1:
+                    # 单音：直接延长
+                    result[i] = ScheduledNote(
+                        prev.start_time, prev.duration + n.duration,
+                        prev.midis, prev.volume, prev.part_index,
+                        is_continuation=False,
+                    )
+                else:
+                    # 和弦：拆出被 tie 的音单独延长，其余保持
+                    others = [m for m in prev.midis if m != midi]
+                    result.pop(i)
+                    if others:
+                        result.append(ScheduledNote(
+                            prev.start_time, prev.duration, others,
+                            prev.volume, prev.part_index, is_continuation=False,
+                        ))
+                    result.append(ScheduledNote(
+                        prev.start_time, prev.duration + n.duration, [midi],
+                        prev.volume, prev.part_index, is_continuation=False,
+                    ))
+                    # 和弦拆开后需按 start_time 排序
+                    result.sort(key=lambda x: (x.start_time, -len(x.midis)))
+                break
+            if not merged:
+                result.append(n)
+        return result
+
     def _render_notes(self, notes: list[ScheduledNote]) -> tuple[np.ndarray, float]:
         """
         将 ScheduledNote 列表渲染为混合后的音频数组。
         返回 (audio_array, total_duration_seconds)
         """
+        notes = self._merge_continuation_notes(notes)
         if not notes:
             return np.array([], dtype=np.float32), 0.0
         
@@ -82,10 +143,17 @@ class Player:
         mix = np.zeros(total_samples, dtype=np.float32)
         
         for n in notes:
+            inst = getattr(n, "instrument", "grand_piano")
+            chord_midis = n.midis if len(n.midis) > 1 else None
             for midi in n.midis:
-                wav = self._load_wav(midi)
+                wav = self._load_wav(midi, instrument=inst, chord_midis=chord_midis)
                 if wav is None:
-                    continue
+                    from instrument_registry import midi_to_note_name
+                    note_name = midi_to_note_name(midi)
+                    chord_str = f" 和弦 {', '.join(midi_to_note_name(m) for m in chord_midis)}" if chord_midis else ""
+                    raise RuntimeError(
+                        f"音符 {note_name}（MIDI {midi}）{chord_str} 超出 [{inst}] 音域，无法弹奏"
+                    )
                 start_sample = int(n.start_time * self.sample_rate)
                 # 裁剪或填充以匹配 duration
                 target_len = int(n.duration * self.sample_rate)

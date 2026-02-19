@@ -33,9 +33,17 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 - [8va] 高八度（ottava alta），将括号内音符整体升高一个八度
 - [8vb] 低八度（ottava bassa），将括号内音符整体降低一个八度
 - [15va] 高两个八度（quindicesima），将括号内音符整体升高两个八度
-6. 和声记号
+6. 琶音装饰`[a]` / `[arpeggio]`
+- 快速连续弹奏多个音符，从最低音开始，同时终止。无括号时只作用于右边第一个音（单音或和弦）；有括号 `[a](...)` 则作用于括号内所有音。
+
+有效的例子：
+```text
+| [a]1/3/5 2 3 |        # 和弦 1/3/5 琶音，2、3 正常
+| [arpeggio](1 2 3 4) | # 括号内四个音依次琶音
+```
+7. 和声记号
 - [+3][-3][+5][-5] 按音名往下/上数：+3 往上三度（如 E→G），-3 往下三度（如 E→C、G→E）；+5/-5 同理。**不可用于含升降号（# b ^）的音符**。
-7. 反复与结束记号
+8. 反复与结束记号
 - [dc] Da Capo：从此处跳回开头，再演奏至 [fine] 结束。
 - [fine]：在此处结束演奏。
 
@@ -142,15 +150,13 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 
 ### 调性
 调性输入在最前面，对所有音符应用统一半音偏移。**篇章之间**可用新的 `\tonality`、`\beat`、`\bpm` 覆盖前面的设定，实现转调、转拍、变速。
-- `\tonality{X}` 表示调性，X 为 1–7 的简谱音名（CDEFGAB），**区分大小写**。
-- `1`=C, `2`=D, `3`=E, `4`=F, `5`=G, `6`=A, `7`=B 大调。
-- `b` 表示降号，写在数字或字母前：`b1`=Cb, `b2`=Db, `bA`=Ab, `bB`=Bb 等。
-- `#` 表示升号：`#1`=C#, `#2`=D# 等。
-- 直接整数表示统一半音偏移：`\tonality{+2}`、`\tonality{-1}`、`\tonality{8}` 等。
+- `\tonality{X}` 表示调性，对所有音符应用半音偏移。
+- **数字**：直接表示上移或下移多少个半音，如 `0`、`1`、`-1`、`+2`。
+- **字母+升降号**：快捷写法，`C`=0、`D`=2、`#C`=1、`bD`=1、`bA`=8 等。
 
 有效的例子：
 ```text
-\tonality{1}
+\tonality{0}
 \tonality{b1}
 \tonality{bA}
 \tonality{bB}
@@ -206,7 +212,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 
 有效的例子：
 ```text
-\tonality{1}
+\tonality{0}
 \beat{4/4}
 \bpm{120}
 
@@ -231,7 +237,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 - 行内歌词：`1(啊) 2(一)` 在音符后加括号（未测试！！）
 
 ```text
-\tonality{1}
+\tonality{0}
 \beat{4/4}
 \lyrics{do/re/mi/fa}
 
@@ -245,7 +251,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 - **melody**：和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
 
 ```text
-\tonality{1}
+\tonality{0}
 \beat{4/4}
 \lyrics{啊/呀/哦}{0}{5}{0}  // 音节/声部0/音色5/第一音旋律
 & 1 2 3 | 4 5 6
@@ -253,7 +259,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 
 和弦 melody 示例（同一声部有和弦时，`0` 取每和弦第一音、`1` 取第二音）：但目前只能启用一个
 ```text
-\tonality{1}
+\tonality{0}
 \beat{4/4}
 \bpm{60}
 \lyrics{低/低/音/音/唱/唱}{0}{5}{0}   // melody=0：取 1/3、2/4、3/5、4/6、5/7、6/1. 中的 1、2、3、4、5、6
@@ -269,7 +275,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 
 有效的例子：
 ```text
-\tonality{1}
+\tonality{0}
 \beat{4/4}
 \bpm{60}
 
