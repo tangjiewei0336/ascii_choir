@@ -8,6 +8,29 @@ docker pull voicevox/voicevox_engine:cpu-latest
 docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 ```
 
+### 导出 MP3
+
+文件菜单中可以导出为MP3。
+
+导出为 MP3 需要安装 **ffmpeg**。若未安装，程序会自动回退为 WAV 格式。
+
+**macOS（Homebrew）**：
+```bash
+brew install ffmpeg
+```
+
+**Windows**：
+- winget：`winget install ffmpeg`
+- Chocolatey：`choco install ffmpeg`
+- 或从 [ffmpeg.org](https://ffmpeg.org/download.html) 下载，将 `bin` 目录加入 PATH
+
+**Linux**：
+- Ubuntu/Debian：`sudo apt install ffmpeg`
+- Fedora：`sudo dnf install ffmpeg`
+- Arch：`sudo pacman -S ffmpeg`
+
+安装后可用 `ffmpeg -version` 验证。
+
 ## 记号介绍
 
 #### 1. `[]` 表示奏法记号或简谱格式记号，目前支持如下记号（同组记号之间互斥）：
