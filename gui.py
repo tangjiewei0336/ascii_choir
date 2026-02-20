@@ -330,6 +330,7 @@ class App:
         file_menu.add_command(label="保存", command=self._on_save, accelerator="Ctrl+S")
         file_menu.add_command(label="另存为...", command=self._on_save_as)
         file_menu.add_command(label="导出带歌词简谱 (JPG)...", command=self._on_export_lyrics_jpg)
+        file_menu.add_command(label="导出为 MP3...", command=self._on_export_mp3)
         file_menu.add_separator()
         file_menu.add_command(label="打开工作区...", command=self._on_open_workspace)
         file_menu.add_command(label="打开示例工作区", command=self._on_open_example_workspace)
@@ -478,6 +479,84 @@ class App:
         except Exception as e:
             import traceback
             show_error_detail(self.root, "导出失败", str(e), traceback.format_exc())
+
+    def _on_export_mp3(self):
+        """导出当前简谱为 MP3（或 WAV，若 ffmpeg 不可用）"""
+        content = self.text.get(1.0, tk.END)
+        if not content.strip():
+            messagebox.showwarning("提示", "请输入简谱内容")
+            return
+        base_dir = (
+            self.workspace_root
+            if self.workspace_root and self.workspace_root.is_dir()
+            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+        )
+        try:
+            content = expand_imports(content, base_dir)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            import traceback
+            show_error_detail(self.root, "导入错误", str(e), traceback.format_exc())
+            return
+        try:
+            parse(content)
+        except Exception as e:
+            import traceback
+            show_error_detail(self.root, "解析错误", str(e), traceback.format_exc())
+            return
+
+        initialdir = str(self.current_file_path.parent) if self.current_file_path else None
+        initialfile = (self.current_file_path.stem + ".mp3") if self.current_file_path else "export.mp3"
+        path = filedialog.asksaveasfilename(
+            title="导出为 MP3",
+            initialdir=initialdir,
+            initialfile=initialfile,
+            defaultextension=".mp3",
+            filetypes=[("MP3 音频", "*.mp3"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+
+        pw = ProgressWindow(self.root, title="导出 MP3", status_frame=self.status_frame)
+        pw.show()
+        pw.update("生成音频中...", 0)
+
+        def progress_cb(current, total, phase="generating"):
+            if total > 0:
+                pct = current / total * 100
+            else:
+                pct = 0
+            self.root.after(0, lambda: pw.update(f"生成中 {int(current)}/{int(total)} 段", pct))
+
+        def run():
+            try:
+                from export_mp3 import export_audio_to_mp3
+
+                self.player.set_progress_callback(progress_cb)
+                result = self.player.render_audio(content)
+                self.player.set_progress_callback(None)
+                if result is None:
+                    self.root.after(0, lambda: _done(False, "曲目为空，无法导出"))
+                    return
+                audio, _ = result
+                self.root.after(0, lambda: pw.update("导出文件中...", 90))
+                out_path, is_mp3 = export_audio_to_mp3(audio, self.player.sample_rate, path)
+                self.root.after(0, lambda: _done(True, out_path, is_mp3))
+            except Exception as e:
+                import traceback
+                err_msg, tb = str(e), traceback.format_exc()
+                self.root.after(0, lambda e=err_msg, t=tb: _done(False, e, tb=t))
+
+        def _done(ok: bool, msg: str, is_mp3: bool = False, tb: str | None = None):
+            pw.close()
+            if ok:
+                if is_mp3:
+                    messagebox.showinfo("导出成功", f"已保存到 {msg}")
+                else:
+                    messagebox.showinfo("导出完成", f"ffmpeg 不可用，已导出为 WAV：\n{msg}")
+            else:
+                show_error_detail(self.root, "导出失败", msg, tb)
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _on_format(self):
         """格式化：对齐小节号"""

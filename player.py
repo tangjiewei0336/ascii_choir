@@ -181,6 +181,113 @@ class Player:
             mix = mix / max_val * 0.95
         
         return mix, total_duration
+
+    def render_audio(self, score_text: str) -> tuple[np.ndarray, float] | None:
+        """
+        解析并生成简谱音频，不播放。返回 (audio_mono, duration_seconds) 或 None（空曲目）。
+        支持 TTS、歌词合成，使用与 play_score 相同的缓存。
+        """
+        self._stop_requested = False
+        lib_path = self._sound_library_path
+        ck = cache_key_play(score_text, lib_path, self.sample_rate)
+        cached = get_cached_audio(ck)
+        if cached is not None:
+            return cached
+
+        parsed = parse(score_text)
+        segments = schedule_segments(parsed)
+        if not segments:
+            return None
+
+        n_seg = len(segments)
+        if self._on_progress:
+            self._on_progress(0, n_seg, "generating")
+
+        audio_parts: list[np.ndarray] = []
+        total_duration = 0.0
+        seg_idx = 0
+
+        while seg_idx < len(segments):
+            seg = segments[seg_idx]
+            for tts in seg.tts_before:
+                if self._stop_requested:
+                    break
+                voice_id = getattr(tts, "voice_id", None)
+                tts_result = generate_tts_audio(tts.text, tts.lang, self.sample_rate, voice_id=voice_id)
+                if tts_result:
+                    tts_audio, tts_dur = tts_result
+                    audio_parts.append(tts_audio)
+                    total_duration += tts_dur
+
+            if self._stop_requested:
+                break
+
+            if not seg.notes:
+                seg_idx += 1
+                if self._on_progress:
+                    self._on_progress(seg_idx, n_seg, "generating")
+                continue
+
+            lyrics_parts = get_lyrics_part_indices(parsed, seg.section_index) if has_lyrics_voice(parsed, seg.section_index) else []
+
+            if lyrics_parts:
+                merge_segs: list[ScheduledSegment] = [seg]
+                j = seg_idx + 1
+                while j < len(segments) and not segments[j].tts_before:
+                    merge_segs.append(segments[j])
+                    j += 1
+
+                lyrics_ck = cache_key_lyrics(score_text, seg.section_index, self.sample_rate)
+                sing_result = synthesize_lyrics(
+                    parsed, seg.section_index, self.sample_rate, max_duration_seconds=None, cache_key=lyrics_ck
+                )
+                voice_audio = sing_result[0] if sing_result else np.array([], dtype=np.float32)
+
+                lyrics_set = set(lyrics_parts)
+                t_offset = 0.0
+                accomp_parts: list[tuple[np.ndarray, float]] = []
+                for mseg in merge_segs:
+                    other_notes = [n for n in mseg.notes if n.part_index not in lyrics_set]
+                    if other_notes:
+                        acc, acc_dur = self._render_notes(other_notes)
+                        if len(acc) > 0:
+                            accomp_parts.append((acc, t_offset))
+                    t_offset += max(n.start_time + n.duration for n in mseg.notes)
+
+                target_len = max(len(voice_audio), int(t_offset * self.sample_rate) + 1)
+                mix = np.zeros(target_len, dtype=np.float32)
+                if len(voice_audio) > 0:
+                    mix[:len(voice_audio)] += voice_audio
+                for acc_audio, offset in accomp_parts:
+                    start_samp = int(offset * self.sample_rate)
+                    end_samp = min(start_samp + len(acc_audio), target_len)
+                    mix[start_samp:end_samp] += acc_audio[: end_samp - start_samp]
+
+                audio_parts.append(mix)
+                total_duration += target_len / self.sample_rate
+                seg_idx = j
+            else:
+                seg_audio, seg_dur = self._render_notes(seg.notes)
+                audio_parts.append(seg_audio)
+                total_duration += seg_dur
+                seg_idx += 1
+            if self._on_progress:
+                self._on_progress(seg_idx, n_seg, "generating")
+
+        if not audio_parts:
+            return None
+
+        audio = np.concatenate([a for a in audio_parts if len(a) > 0])
+        if len(audio) == 0:
+            return None
+
+        max_val = np.abs(audio).max()
+        if max_val > 1.0:
+            audio = audio / max_val * 0.95
+
+        total_duration = len(audio) / self.sample_rate
+        save_audio_to_cache(ck, audio, total_duration)
+        return audio, total_duration
     
     def play_score(self, score_text: str) -> float:
         """
