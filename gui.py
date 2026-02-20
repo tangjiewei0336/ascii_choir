@@ -26,6 +26,7 @@ from renderer import render_to_image, render_to_pil
 from validator import validate, VOICEVOX_UNREACHABLE_MSG
 from breakpoints import load_breakpoints, save_breakpoints, rename_breakpoints
 from voicevox_client import VOICEVOX_BASE
+from progress_window import ProgressWindow
 
 
 def show_error_detail(parent: tk.Tk, title: str, message: str, traceback_str: str | None = None) -> None:
@@ -201,6 +202,42 @@ SAMPLE_HARMONY = r"""\tonality{0}
 |0 - 0 (.6/1 .7/2)_ | 1/3 (2/4 3/5 0)_  3/5 3/5_ | ~3/~5 1/3 3/5 6/1. |
 """
 
+# 帮助条目：(显示名, 可插入示例, 详细中文说明)
+HELP_ENTRIES: list[tuple[str, str, str]] = [
+    ("1-7 音符", "1 2 3 4 5 6 7", "数字 1 到 7 表示 do、re、mi、fa、sol、la、si 七个音。根据调性自动换算音高。"),
+    ("0 休止符", "0 - - -", "0 表示休止符，不发音。后面可加 - 表示时值，如 0 - - - 为四拍休止。"),
+    ("- 增加一拍", "1- 2- 3-", "音符后的 - 表示增加一拍。1 为四分音符，1- 为二分音符（两拍），1- - 为三拍。"),
+    ("_ 缩短时值", "1_ 2_ 3_ 4_", "音符后的 _ 将时值缩短一半。1 为四分，1_ 为八分，1__ 为十六分。"),
+    (". 高八度", "1. 2. 3.", "音符后的 . 表示高八度。1. 为高音 do，1.. 为更高八度。"),
+    ("( ) 和弦", "(1 3 5) (2 4 6)", "括号内多个音符同时演奏，形成和弦。如 (1 3 5) 为 do mi sol 大三和弦。"),
+    ("& 多声部", "& |1 2 3 4|\n& |5 6 7 1.|", "& 开始新声部，每行一个声部。用于多声部合奏或伴奏。"),
+    ("| 小节线", "|1 2 3 4|5 6 7 1.|", "| 为小节分隔符。根据拍号检查每小节时值是否正确。"),
+    ("( )n n连音", "(1 2 3)3", "括号后加数字 n 表示 n 连音。如 (1 2 3)3 将两拍均分为三个音。"),
+    ("~ 连音线", "1~ 2~ 3~ 4~", "~ 表示连音线，连接相邻同音高音符，使时值延续不重复触发。"),
+    ("# b ^ 变音", "#1 b2 ^3", "# 升半音，b 降半音，^ 还原。作用于其后音符，如 #1 为升 do。"),
+    ("[音色]", "[cello]|1 2 3 4|", "方括号内指定音色名称，如 [cello]、[guitar]。作用于其后的小节或记号范围。"),
+    ("[记号](...)", "[8vb](|.3---|3---|)", "记号作用域：方括号定义记号，圆括号内为作用范围。如 [8vb] 表示低八度。"),
+    ("[dc][fine]", "[dc]|1 2|[fine]|3 4|", "反复记号：[dc] 从头反复，[fine] 结束。常用于 D.C. al Fine 结构。"),
+    ("// 注释", "// 这是注释", "双斜杠开始单行注释，该行内容不会被解析。"),
+    ("\\tonality", "\\tonality{0}", "设置调性。0 表示 C 大调，数字为半音偏移。如 \\tonality{2} 为 D 大调。"),
+    ("\\beat", "\\beat{4/4}", "设置拍号。4/4 表示每小节四拍、四分音符为一拍。"),
+    ("\\bpm", "\\bpm{120}", "设置速度，单位 BPM（每分钟拍数）。120 表示每分钟 120 个四分音符。"),
+    ("\\no_bar_check", "\\no_bar_check", "禁用小节时值检查。适合自由记谱，此时 beat 无效。"),
+    ("\\tts", "\\tts{你好}{zh}{0}", "篇章间 TTS 语音。参数：文本、语言(zh/ja/en)、VOICEVOX 音色 ID。"),
+    ("\\lyrics", "\\lyrics{啊/啊}{0}{0}{1 2 3 4}", "歌词：字/字 对应音符、声部、音色 ID、旋律。支持歌声合成。"),
+    ("1(啊) 行内歌词", "1(啊) 2(呀) 3(哈)", "音符后括号内为行内歌词，一个字对应一个音。用于简谱下方歌词。"),
+    ("\\import", "\\import{其他.choir}", "导入其他 .choir 或 .txt 文件内容。路径相对于当前文件所在目录。"),
+]
+
+HELP_EXAMPLES = {
+    "单声部": SAMPLE_SCORE,
+    "无小节": SAMPLE_NO_BAR,
+    "多声部": SAMPLE_MULTI,
+    "变调": SAMPLE_KEY_CHANGE,
+    "自动和声": SAMPLE_AUTO_HARMONY,
+    "和声": SAMPLE_HARMONY,
+}
+
 
 # 嵌套括号荧光色（浅色模式）
 BRACKET_COLORS_LIGHT = ["#e8f4e8", "#e8e8f4", "#f4f4e8", "#f4e8f4", "#e8f4f4", "#f4e8e8"]
@@ -315,6 +352,14 @@ class App:
         instrument_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="乐器", menu=instrument_menu)
         instrument_menu.add_command(label="乐器面板...", command=self._on_instrument_panel)
+
+        settings_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="设置", menu=settings_menu)
+        settings_menu.add_command(label="缓存设置...", command=self._on_cache_settings)
+
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="帮助", menu=help_menu)
+        help_menu.add_command(label="用法说明", command=self._on_help)
         
         self.root.bind("<Control-n>", lambda e: self._on_new())
         self.root.bind("<Control-o>", lambda e: self._on_open())
@@ -619,7 +664,155 @@ class App:
         except ImportError as e:
             import traceback
             show_error_detail(self.root, "错误", f"无法加载乐器面板: {e}", traceback.format_exc())
-    
+
+    def _on_help(self):
+        """打开用法说明：左侧条目列表，右侧详细中文解释"""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("用法说明")
+        dlg.transient(self.root)
+        dlg.geometry("720x480")
+        main = ttk.Frame(dlg, padding=10)
+        main.pack(fill=tk.BOTH, expand=True)
+        content = ttk.Frame(main)
+        content.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        left_frame = ttk.LabelFrame(content, text="条目", padding=5)
+        left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        left_scroll = ttk.Scrollbar(left_frame)
+        left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        lst = tk.Listbox(
+            left_frame,
+            font=("", 11),
+            height=20,
+            width=22,
+            selectmode=tk.SINGLE,
+            yscrollcommand=left_scroll.set,
+        )
+        lst.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        left_scroll.config(command=lst.yview)
+        for name, _, _ in HELP_ENTRIES:
+            lst.insert(tk.END, name)
+        lst.selection_set(0)
+        lst.see(0)
+
+        right_frame = ttk.LabelFrame(content, text="详细说明", padding=5)
+        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        detail_txt = scrolledtext.ScrolledText(
+            right_frame, wrap=tk.WORD, font=("", 11), height=22, width=55
+        )
+        detail_txt.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+        detail_txt.config(state=tk.DISABLED)
+
+        def _update_detail():
+            sel = lst.curselection()
+            if sel and sel[0] < len(HELP_ENTRIES):
+                name, example, detail = HELP_ENTRIES[sel[0]]
+                detail_txt.config(state=tk.NORMAL)
+                detail_txt.delete(1.0, tk.END)
+                detail_txt.insert(tk.END, f"{name}\n\n{detail}\n\n示例：\n{example}")
+                detail_txt.config(state=tk.DISABLED)
+
+        def _on_select(_=None):
+            sel = lst.curselection()
+            if sel and sel[0] < len(HELP_ENTRIES):
+                _, example, _ = HELP_ENTRIES[sel[0]]
+                self.text.insert(tk.INSERT, example)
+                dlg.destroy()
+
+        lst.bind("<<ListboxSelect>>", lambda e: _update_detail())
+        lst.bind("<Double-Button-1>", _on_select)
+        lst.bind("<Return>", _on_select)
+        _update_detail()
+
+        btn_frame = ttk.Frame(main)
+        btn_frame.pack(fill=tk.X)
+        ttk.Button(btn_frame, text="插入选中条目 (双击或回车)", command=_on_select).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Separator(btn_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
+        ttk.Label(btn_frame, text="完整示例：").pack(side=tk.LEFT, padx=(0, 5))
+        for ex_name, ex_content in HELP_EXAMPLES.items():
+            def _insert(c=ex_content):
+                self.text.delete(1.0, tk.END)
+                self.text.insert(tk.END, c)
+                dlg.destroy()
+            ttk.Button(btn_frame, text=ex_name, command=_insert).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(main, text="关闭", command=dlg.destroy).pack(pady=(10, 0))
+        dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 80}")
+
+    def _on_cache_settings(self):
+        """打开缓存设置对话框"""
+        try:
+            from audio_cache import (
+                clear_cache,
+                get_cache_size_limit_mb,
+                get_cache_size_mb,
+                set_cache_size_limit_mb,
+            )
+        except ImportError:
+            messagebox.showwarning("缓存设置", "无法加载 audio_cache 模块", parent=self.root)
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("缓存设置")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+
+        main = ttk.Frame(dlg, padding=15)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main, text="音频缓存用于加速重复播放，减少 VOICEVOX/TTS 调用。").pack(anchor=tk.W)
+
+        # 当前缓存大小
+        size_frame = ttk.Frame(main)
+        size_frame.pack(fill=tk.X, pady=(10, 5))
+        ttk.Label(size_frame, text="当前缓存大小：").pack(side=tk.LEFT)
+        size_var = tk.StringVar()
+
+        def _refresh_size():
+            size_var.set(f"{get_cache_size_mb():.1f} MB")
+
+        _refresh_size()
+        ttk.Label(size_frame, textvariable=size_var).pack(side=tk.LEFT, padx=(0, 10))
+
+        # 缓存大小限制
+        limit_frame = ttk.Frame(main)
+        limit_frame.pack(fill=tk.X, pady=(10, 5))
+        ttk.Label(limit_frame, text="缓存大小限制（MB）：").pack(side=tk.LEFT)
+        limit_var = tk.StringVar(value=str(int(get_cache_size_limit_mb())))
+        limit_entry = ttk.Entry(limit_frame, textvariable=limit_var, width=8)
+        limit_entry.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(limit_frame, text="（超出后按最近使用时间逐出）").pack(side=tk.LEFT, padx=(8, 0))
+
+        # 清空缓存
+        def _on_clear():
+            if messagebox.askyesno("确认", "确定要清空所有缓存吗？", parent=dlg):
+                n = clear_cache()
+                _refresh_size()
+                messagebox.showinfo("完成", f"已删除 {n} 个缓存文件", parent=dlg)
+
+        btn_clear = ttk.Button(main, text="清空缓存", command=_on_clear)
+        btn_clear.pack(pady=(15, 0))
+
+        # 确定/取消
+        def _on_ok():
+            try:
+                mb = float(limit_var.get().strip())
+                if 10 <= mb <= 10000:
+                    set_cache_size_limit_mb(mb)
+                    messagebox.showinfo("保存", "已保存设置", parent=dlg)
+                    dlg.destroy()
+                else:
+                    messagebox.showwarning("输入错误", "请输入 10 ～ 10000 之间的数值", parent=dlg)
+            except ValueError:
+                messagebox.showwarning("输入错误", "请输入有效的数字", parent=dlg)
+
+        btn_frame = ttk.Frame(main)
+        btn_frame.pack(pady=(20, 0))
+        ttk.Button(btn_frame, text="确定", command=_on_ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=dlg.destroy).pack(side=tk.LEFT)
+
+        dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 120}")
+        dlg.grab_set()
+        dlg.focus_set()
+
     def _on_open_workspace(self):
         default_dir = WORKSPACES_DIR
         default_dir.mkdir(parents=True, exist_ok=True)
@@ -928,18 +1121,17 @@ class App:
             variable=self.auto_wrap_var,
         ).pack(side=tk.LEFT, padx=(15, 0))
         
-        # 进度条
         self.progress_var = tk.DoubleVar(value=0)
-        self.progress = ttk.Progressbar(main, variable=self.progress_var, maximum=100)
-        self.progress.pack(fill=tk.X, pady=(0, 5))
-        
-        # 状态栏：行列号、总拍数、小节数
+        self._progress_status_var = tk.StringVar(value="")
+
+        # 状态栏（PyCharm 风格）：左侧状态、右侧行列/拍数、右下角可嵌入进度条
         self.status_frame = ttk.Frame(main)
         self.status_frame.pack(fill=tk.X)
         self.status_label = ttk.Label(self.status_frame, text="就绪")
         self.status_label.pack(side=tk.LEFT)
         self.status_bar = ttk.Label(self.status_frame, text="行: 1  列: 1  |  总拍: —  小节: —")
         self.status_bar.pack(side=tk.RIGHT)
+        self._status_progress_frame: ttk.Frame | None = None  # 播放阶段嵌入的进度条
         
         # 编辑区（左侧行号 + 正文）
         ttk.Label(main, text="简谱输入（支持 \\tonality、\\beat、\\bpm、\\no_bar_check）:").pack(anchor=tk.W)
@@ -1098,17 +1290,6 @@ class App:
         self._auto_save_timer = None
         
         self._update_diagnostics()
-
-        # 底部说明（用 tk.Label 以支持主题色）
-        hint_bg = "#2d2d2d" if self._dark_mode else "#f0f0f0"
-        self.hint = tk.Label(
-            main,
-            text="支持: 1-7 音符, 0 休止, - 增加一拍, _ 缩短, . 八度, / 和弦, & 多声部, | 小节, ( )n n连音, ~ 连音线, # b ^ 升降还原, [cello][guitar] 音色, [xxx](...) 记号, [dc][fine] 反复, // 单行注释, \\tts{文本}{zh/ja/en}{voice_id} 篇章间语音, \\lyrics{字/字}{part}{voice_id}{melody} 歌词, 1(啊) 行内歌词, \\import{文件名} 导入 | 文件→导出带歌词简谱(JPG) | Ctrl+F 对齐 | 括号高亮",
-            font=("", 9),
-            fg=colors["hint_fg"],
-            bg=hint_bg,
-        )
-        self.hint.pack(anchor=tk.W)
     
     def _theme_colors(self) -> dict:
         """根据系统主题返回颜色配置"""
@@ -2013,10 +2194,48 @@ class App:
         self.progress_var.set(0)
         self.status_label.config(text="播放 A-B 区间...")
 
-        def progress_cb(current: float, total: float):
+        self._progress_win = ProgressWindow(self.root, title="生成进度", status_frame=self.status_frame)
+        self._progress_show_after_id = None
+
+        def progress_cb(current: float, total: float, phase: str = "playing"):
             if total > 0:
                 pct = current / total * 100
-                self.root.after(0, lambda: self.progress_var.set(pct))
+            else:
+                pct = 0
+            self.root.after(0, lambda: self.progress_var.set(pct))
+            if phase == "generating":
+                status = f"生成中 {int(current)}/{int(total)} 段"
+                def _schedule_or_update(s=status, p=pct):
+                    self._last_gen_status = s
+                    self._last_gen_pct = p
+                    pw = getattr(self, "_progress_win", None)
+                    if pw and pw.win and pw.win.winfo_exists():
+                        pw.update(s, p)
+                    elif getattr(self, "_progress_show_after_id", None) is None:
+                        def _delayed_show():
+                            self._progress_show_after_id = None
+                            pw = getattr(self, "_progress_win", None)
+                            if pw:
+                                pw.show()
+                                pw.update(getattr(self, "_last_gen_status", ""), getattr(self, "_last_gen_pct", 0))
+                        self._progress_show_after_id = self.root.after(500, _delayed_show)
+                self.root.after(0, _schedule_or_update)
+            else:
+                def _close_progress(c=current, t=total):
+                    aid = getattr(self, "_progress_show_after_id", None)
+                    if aid is not None:
+                        try:
+                            self.root.after_cancel(aid)
+                        except tk.TclError:
+                            pass
+                        self._progress_show_after_id = None
+                    pw = getattr(self, "_progress_win", None)
+                    if pw:
+                        pw.close()
+                        self._progress_win = None
+                    self._progress_status_var.set(f"播放中 {c:.1f}s / {t:.1f}s")
+                    self._ensure_status_progress()
+                self.root.after(0, _close_progress)
 
         self.player.set_progress_callback(progress_cb)
 
@@ -2057,14 +2276,52 @@ class App:
         self.btn_stop.config(state=tk.NORMAL)
         self.progress_var.set(0)
         self.status_label.config(text="播放中...")
-        
-        def progress_cb(current: float, total: float):
+
+        self._progress_win = ProgressWindow(self.root, title="生成进度", status_frame=self.status_frame)
+        self._progress_show_after_id = None
+
+        def progress_cb(current: float, total: float, phase: str = "playing"):
             if total > 0:
                 pct = current / total * 100
-                self.root.after(0, lambda: self.progress_var.set(pct))
-        
+            else:
+                pct = 0
+            self.root.after(0, lambda: self.progress_var.set(pct))
+            if phase == "generating":
+                status = f"生成中 {int(current)}/{int(total)} 段"
+                def _schedule_or_update(s=status, p=pct):
+                    self._last_gen_status = s
+                    self._last_gen_pct = p
+                    pw = getattr(self, "_progress_win", None)
+                    if pw and pw.win and pw.win.winfo_exists():
+                        pw.update(s, p)
+                    elif getattr(self, "_progress_show_after_id", None) is None:
+                        def _delayed_show():
+                            self._progress_show_after_id = None
+                            pw = getattr(self, "_progress_win", None)
+                            if pw:
+                                pw.show()
+                                pw.update(getattr(self, "_last_gen_status", ""), getattr(self, "_last_gen_pct", 0))
+                        self._progress_show_after_id = self.root.after(500, _delayed_show)
+                self.root.after(0, _schedule_or_update)
+            else:
+                def _close_progress(c=current, t=total):
+                    aid = getattr(self, "_progress_show_after_id", None)
+                    if aid is not None:
+                        try:
+                            self.root.after_cancel(aid)
+                        except tk.TclError:
+                            pass
+                        self._progress_show_after_id = None
+                    pw = getattr(self, "_progress_win", None)
+                    if pw:
+                        pw.close()
+                        self._progress_win = None
+                    self._progress_status_var.set(f"播放中 {c:.1f}s / {t:.1f}s")
+                    self._ensure_status_progress()
+                self.root.after(0, _close_progress)
+
         self.player.set_progress_callback(progress_cb)
-        
+
         def run():
             try:
                 self.player.play_score(score)
@@ -2074,10 +2331,26 @@ class App:
                 self.root.after(0, lambda: show_error_detail(self.root, "播放错误", err_msg, tb))
             finally:
                 self.root.after(0, self._on_play_finished)
-        
+
         self.play_thread = threading.Thread(target=run, daemon=True)
         self.play_thread.start()
     
+    def _ensure_status_progress(self) -> None:
+        """在状态栏显示嵌入的进度条（播放阶段）"""
+        if self._status_progress_frame and self._status_progress_frame.winfo_exists():
+            self._progress_status_var.set(self._progress_status_var.get())
+            return
+        self._status_progress_frame = ttk.Frame(self.status_frame)
+        self._status_progress_frame.pack(side=tk.RIGHT, padx=(0, 15))
+        ttk.Label(self._status_progress_frame, textvariable=self._progress_status_var, font=("", 9)).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Progressbar(self._status_progress_frame, variable=self.progress_var, maximum=100, length=120).pack(side=tk.LEFT)
+
+    def _hide_status_progress(self) -> None:
+        """隐藏状态栏中的嵌入进度条"""
+        if self._status_progress_frame and self._status_progress_frame.winfo_exists():
+            self._status_progress_frame.destroy()
+            self._status_progress_frame = None
+
     def _on_play_finished(self):
         self.is_playing = False
         self.btn_play.config(state=tk.NORMAL)
@@ -2085,6 +2358,17 @@ class App:
         self.btn_stop.config(state=tk.DISABLED)
         self.progress_var.set(100)
         self.status_label.config(text="播放完成")
+        self._hide_status_progress()
+        aid = getattr(self, "_progress_show_after_id", None)
+        if aid is not None:
+            try:
+                self.root.after_cancel(aid)
+            except tk.TclError:
+                pass
+            self._progress_show_after_id = None
+        pw = getattr(self, "_progress_win", None)
+        if pw:
+            pw.close()
     
     def _on_stop(self):
         self.player.stop()

@@ -832,6 +832,8 @@ def _parse_notation_scope(
                         chord.append(ev.midi)
                         max_dur = max(max_dur, ev.duration_beats)
                 add_dur = max_dur  # 连音和弦取各音最大时值（支持 ~.5/~1--- 等）
+                if tok.rstrip().endswith("_"):
+                    add_dur = base_duration / 2  # ~2/5/7_ 整和弦为八分
                 acc_tok = _any_accidental_in_tokens(parts) if harmony != 0 else None
                 if acc_tok:
                     pos = content.rfind(acc_tok, 0, i + len(tok) + 1)

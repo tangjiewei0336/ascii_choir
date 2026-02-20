@@ -1,11 +1,14 @@
 """
 TTS 辅助：生成语音音频，支持中/日/英
 voice_id 有值时用 VOICEVOX，否则用 edge-tts（需网络）
+通过哈希缓存已生成的音频，相同文本/音色直接加载缓存。
 """
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+from audio_cache import cache_key_tts, get_cached_audio, save_audio_to_cache
 
 # 语言 -> edge-tts 语音
 VOICE_MAP = {
@@ -23,9 +26,14 @@ def generate_tts_audio(
     """
     生成 TTS 音频，返回 (float32 mono 数组, 时长秒)。
     voice_id 有值时用 VOICEVOX 合成，否则用 edge-tts。
-    若失败返回 None。
+    若失败返回 None。相同参数会从缓存加载。
     """
     global _tts_warned
+    ck = cache_key_tts(text, lang, voice_id, sample_rate)
+    cached = get_cached_audio(ck)
+    if cached is not None:
+        return cached
+
     if voice_id is not None:
         try:
             from voicevox_client import synthesize_simple, resolve_speakers_style_id, VOICEVOX_BASE
@@ -41,7 +49,9 @@ def generate_tts_audio(
                 new_len = int(len(data) * ratio)
                 indices = np.linspace(0, len(data) - 1, new_len)
                 data = np.interp(indices, np.arange(len(data)), data).astype(np.float32)
-            return data, len(data) / sample_rate
+            result = data, len(data) / sample_rate
+            save_audio_to_cache(ck, data, result[1])
+            return result
         except Exception as e:
             if "voicevox" not in _tts_warned:
                 _tts_warned.add("voicevox")
@@ -93,6 +103,7 @@ def generate_tts_audio(
                 indices = np.linspace(0, len(samples) - 1, new_len)
                 samples = np.interp(indices, np.arange(len(samples)), samples).astype(np.float32)
             duration = len(samples) / sample_rate
+            save_audio_to_cache(ck, samples, duration)
             return samples, duration
     except ImportError:
         pass
@@ -115,6 +126,7 @@ def generate_tts_audio(
             indices = np.linspace(0, len(samples) - 1, new_len)
             samples = np.interp(indices, np.arange(len(samples)), samples).astype(np.float32)
         duration = len(samples) / sample_rate
+        save_audio_to_cache(ck, samples, duration)
         return samples, duration
     except Exception as e:
         if "decode" not in _tts_warned:

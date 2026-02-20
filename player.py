@@ -2,6 +2,13 @@
 音频播放器：加载 WAV 并按时序混音播放，支持 TTS
 """
 import numpy as np
+
+from audio_cache import (
+    cache_key_lyrics,
+    cache_key_play,
+    get_cached_audio,
+    save_audio_to_cache,
+)
 import soundfile as sf
 import sounddevice as sd
 from pathlib import Path
@@ -19,7 +26,7 @@ except ImportError:
         return None
 
 try:
-    from lyrics_synth import synthesize_lyrics, has_lyrics_voice, get_lyrics_part_index
+    from lyrics_synth import synthesize_lyrics, has_lyrics_voice, get_lyrics_part_indices
 except ImportError:
     def synthesize_lyrics(*args, **kwargs):
         return None
@@ -27,21 +34,22 @@ except ImportError:
     def has_lyrics_voice(*args, **kwargs):
         return False
 
-    def get_lyrics_part_index(*args, **kwargs):
-        return None
+    def get_lyrics_part_indices(*args, **kwargs):
+        return []
 
 
 class Player:
     def __init__(self, sound_library_path: Optional[str] = None):
         path = sound_library_path or get_default_sound_path()
+        self._sound_library_path = path
         self.sound_map = load_sound_library(path)
         self.sample_rate = 44100  # 统一采样率
         self._cache: dict[int, np.ndarray] = {}
         self._stop_requested = False
-        self._on_progress: Optional[Callable[[float, float], None]] = None
-    
-    def set_progress_callback(self, callback: Callable[[float, float], None]):
-        """设置进度回调 (current_time, total_duration)"""
+        self._on_progress: Optional[Callable[..., None]] = None
+
+    def set_progress_callback(self, callback: Callable[..., None]):
+        """设置进度回调 (current, total, phase)。phase 为 'generating' 或 'playing'"""
         self._on_progress = callback
     
     def _load_wav(
@@ -179,13 +187,38 @@ class Player:
         解析并播放简谱，返回总时长(秒)。
         支持篇章间 TTS（\\tts{text}{lang}）。
         阻塞直到播放完成或 stop 被调用。
+        通过哈希缓存已生成的音频，重复播放同一曲目时直接加载缓存。
         """
         self._stop_requested = False
+
+        # 检查全曲缓存
+        lib_path = self._sound_library_path
+        ck = cache_key_play(score_text, lib_path, self.sample_rate)
+        cached = get_cached_audio(ck)
+        if cached is not None:
+            audio, total_duration = cached
+            audio_stereo = np.column_stack([audio, audio])
+            sd.play(audio_stereo, self.sample_rate)
+            step_ms = 50
+            elapsed = 0.0
+            while elapsed < total_duration and not self._stop_requested:
+                sd.sleep(step_ms)
+                elapsed += step_ms / 1000.0
+                if self._on_progress:
+                    self._on_progress(min(elapsed, total_duration), total_duration, "playing")
+            if self._stop_requested:
+                sd.stop()
+            return total_duration
+
         parsed = parse(score_text)
         segments = schedule_segments(parsed)
 
         if not segments:
             return 0.0
+
+        n_seg = len(segments)
+        if self._on_progress:
+            self._on_progress(0, n_seg, "generating")
 
         # 先生成全部内容再播放，避免不同步。有歌词时合并相关篇章，避免唱完后再用 MIDI 重复演奏
         audio_parts: list[np.ndarray] = []
@@ -210,11 +243,13 @@ class Player:
 
             if not seg.notes:
                 seg_idx += 1
+                if self._on_progress:
+                    self._on_progress(seg_idx, n_seg, "generating")
                 continue
 
-            lyrics_part = get_lyrics_part_index(parsed, seg.section_index) if has_lyrics_voice(parsed, seg.section_index) else None
+            lyrics_parts = get_lyrics_part_indices(parsed, seg.section_index) if has_lyrics_voice(parsed, seg.section_index) else []
 
-            if lyrics_part is not None:
+            if lyrics_parts:
                 # 有歌词：合并本段及后续无 TTS 的篇章，歌声 + 伴奏一次性混合，避免唱完再 MIDI 重复
                 merge_segs: list[ScheduledSegment] = [seg]
                 j = seg_idx + 1
@@ -222,16 +257,18 @@ class Player:
                     merge_segs.append(segments[j])
                     j += 1
 
+                lyrics_ck = cache_key_lyrics(score_text, seg.section_index, self.sample_rate)
                 sing_result = synthesize_lyrics(
-                    parsed, seg.section_index, self.sample_rate, max_duration_seconds=None
+                    parsed, seg.section_index, self.sample_rate, max_duration_seconds=None, cache_key=lyrics_ck
                 )
                 voice_audio = sing_result[0] if sing_result else np.array([], dtype=np.float32)
 
-                # 合并所有篇章的伴奏（排除歌词声部），按时间偏移拼接
+                # 合并所有篇章的伴奏（排除所有人声轨），按时间偏移拼接
+                lyrics_set = set(lyrics_parts)
                 t_offset = 0.0
                 accomp_parts: list[tuple[np.ndarray, float]] = []
                 for mseg in merge_segs:
-                    other_notes = [n for n in mseg.notes if n.part_index != lyrics_part]
+                    other_notes = [n for n in mseg.notes if n.part_index not in lyrics_set]
                     if other_notes:
                         acc, acc_dur = self._render_notes(other_notes)
                         if len(acc) > 0:
@@ -258,6 +295,8 @@ class Player:
                 audio_parts.append(seg_audio)
                 total_duration += seg_dur
                 seg_idx += 1
+            if self._on_progress:
+                self._on_progress(seg_idx, n_seg, "generating")
 
         if not audio_parts:
             return 0.0
@@ -271,6 +310,10 @@ class Player:
         if max_val > 1.0:
             audio = audio / max_val * 0.95
 
+        # 保存到缓存供下次使用
+        total_duration = len(audio) / self.sample_rate
+        save_audio_to_cache(ck, audio, total_duration)
+
         audio_stereo = np.column_stack([audio, audio])
 
         sd.play(audio_stereo, self.sample_rate)
@@ -281,7 +324,7 @@ class Player:
             sd.sleep(step_ms)
             elapsed += step_ms / 1000.0
             if self._on_progress:
-                self._on_progress(min(elapsed, total_duration), total_duration)
+                self._on_progress(min(elapsed, total_duration), total_duration, "playing")
 
         if self._stop_requested:
             sd.stop()
