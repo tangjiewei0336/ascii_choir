@@ -8,6 +8,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 from pathlib import Path
+import os
 import threading
 
 from chord_utils import (
@@ -342,7 +343,8 @@ class App:
         edit_menu.add_command(label="粘贴", command=self._on_paste, accelerator="Ctrl+V")
         edit_menu.add_command(label="全选", command=self._on_select_all, accelerator="Ctrl+A")
         edit_menu.add_separator()
-        edit_menu.add_command(label="格式化", command=self._on_format, accelerator="Ctrl+F")
+        fmt_accel = "⌘F" if sys.platform == "darwin" else "Ctrl+F"
+        edit_menu.add_command(label="格式化", command=self._on_format, accelerator=fmt_accel)
         edit_menu.add_command(label="复制全部到剪贴板", command=self._on_copy_all, accelerator="Ctrl+Shift+C")
 
         tts_menu = tk.Menu(menubar, tearoff=0)
@@ -379,6 +381,7 @@ class App:
             self._auto_save_timer = None
         self.text.delete(1.0, tk.END)
         self.text.insert(tk.END, DEFAULT_NEW_FILE)
+        self.text.edit_reset()
         if self.workspace_root and self.workspace_root.is_dir():
             path = self.workspace_root / name
         else:
@@ -483,6 +486,7 @@ class App:
             self.root.clipboard_append(sel)
             self.root.update()
             self.text.delete(tk.SEL_FIRST, tk.SEL_LAST)
+            self._undo_separator()
             self._schedule_auto_save()
             self._schedule_preview()
         except tk.TclError:
@@ -505,6 +509,7 @@ class App:
         try:
             content = self.root.clipboard_get()
             self.text.insert(tk.INSERT, content)
+            self._undo_separator()
             self._schedule_auto_save()
             self._schedule_preview()
         except tk.TclError:
@@ -515,6 +520,24 @@ class App:
         self.text.tag_add(tk.SEL, "1.0", tk.END)
         self.text.mark_set(tk.INSERT, "1.0")
         self.text.see(tk.INSERT)
+
+    def _on_undo(self):
+        """撤销"""
+        try:
+            self.text.edit_undo()
+            self._schedule_auto_save()
+            self._schedule_preview()
+        except tk.TclError:
+            pass  # 无可撤销操作
+
+    def _on_redo(self):
+        """重做"""
+        try:
+            self.text.edit_redo()
+            self._schedule_auto_save()
+            self._schedule_preview()
+        except tk.TclError:
+            pass  # 无可重做操作
 
     def _on_text_context_menu(self, event):
         """编辑器右键菜单：剪切、复制、粘贴、全选；若光标在和弦上则显示和弦操作"""
@@ -535,6 +558,9 @@ class App:
         has_two_note = any(len(c[2].rstrip("_").split("/")) == 2 for c in chords)
 
         menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="撤销", command=self._on_undo)
+        menu.add_command(label="重做", command=self._on_redo)
+        menu.add_separator()
         menu.add_command(label="剪切", command=self._on_cut)
         menu.add_command(label="复制", command=self._on_copy_selection)
         menu.add_command(label="粘贴", command=self._on_paste)
@@ -597,6 +623,7 @@ class App:
             if new_text is not None and new_text != chord_text:
                 self.text.delete(f"1.0+{start}c", f"1.0+{end}c")
                 self.text.insert(f"1.0+{start}c", new_text)
+        self._undo_separator()
         self._schedule_auto_save()
         self._schedule_preview()
         self._do_highlights()
@@ -633,6 +660,7 @@ class App:
             if new_tok is not None and new_tok != tok:
                 self.text.delete(f"1.0+{start}c", f"1.0+{end}c")
                 self.text.insert(f"1.0+{start}c", new_tok)
+        self._undo_separator()
         self._schedule_auto_save()
         self._schedule_preview()
         self._do_highlights()
@@ -732,6 +760,7 @@ class App:
             def _insert(c=ex_content):
                 self.text.delete(1.0, tk.END)
                 self.text.insert(tk.END, c)
+                self.text.edit_reset()
                 dlg.destroy()
             ttk.Button(btn_frame, text=ex_name, command=_insert).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(main, text="关闭", command=dlg.destroy).pack(pady=(10, 0))
@@ -830,6 +859,7 @@ class App:
             content = path.read_text(encoding="utf-8")
             self.text.delete(1.0, tk.END)
             self.text.insert(tk.END, content)
+            self.text.edit_reset()
             self.current_file_path = path
             self.root.title(f"简谱演奏 - {path.name}")
             base = self._get_breakpoint_base_dir()
@@ -842,9 +872,23 @@ class App:
             import traceback
             show_error_detail(self.root, "打开失败", str(e), traceback.format_exc())
     
+    def _can_write(self, path: Path) -> bool:
+        """检查是否有写入权限（mac 复制来的文件可能无写权限）"""
+        if path.exists():
+            return os.access(path, os.W_OK)
+        return os.access(path.parent, os.W_OK)
+
     def _save_to(self, path: Path, silent: bool = False):
         try:
             content = self.text.get(1.0, tk.END)
+            if not self._can_write(path):
+                if messagebox.askyesno(
+                    "无写入权限",
+                    f"文件无写入权限（可能从 Finder 复制而来）：\n{path}\n\n是否另存为到其他位置？",
+                    parent=self.root,
+                ):
+                    self._on_save_as()
+                return
             path.write_text(content, encoding="utf-8")
             prev_path = self.current_file_path
             self.current_file_path = path
@@ -857,6 +901,30 @@ class App:
                 self.root.after(2000, lambda: self.status_label.config(text="就绪"))
             if self.workspace_root and path.parent == self.workspace_root:
                 self._refresh_workspace_list()
+        except PermissionError as e:
+            if messagebox.askyesno(
+                "保存失败",
+                f"文件无写入权限（可能从 Finder 复制而来）：\n{path}\n\n是否另存为到其他位置？",
+                parent=self.root,
+            ):
+                self._on_save_as()
+            else:
+                import traceback
+                show_error_detail(self.root, "保存失败", str(e), traceback.format_exc())
+        except OSError as e:
+            if e.errno == 13:  # Permission denied
+                if messagebox.askyesno(
+                    "保存失败",
+                    f"文件无写入权限（可能从 Finder 复制而来）：\n{path}\n\n是否另存为到其他位置？",
+                    parent=self.root,
+                ):
+                    self._on_save_as()
+                else:
+                    import traceback
+                    show_error_detail(self.root, "保存失败", str(e), traceback.format_exc())
+            else:
+                import traceback
+                show_error_detail(self.root, "保存失败", str(e), traceback.format_exc())
         except Exception as e:
             import traceback
             show_error_detail(self.root, "保存失败", str(e), traceback.format_exc())
@@ -1020,6 +1088,7 @@ class App:
             if self.current_file_path == path:
                 self.current_file_path = None
                 self.text.delete(1.0, tk.END)
+                self.text.edit_reset()
                 self.root.title("简谱演奏 - 未命名")
             self._refresh_workspace_list()
             self.status_label.config(text="已删除")
@@ -1117,7 +1186,7 @@ class App:
         self.auto_wrap_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             toolbar,
-            text="行超宽时 Ctrl+F 自动换新篇章",
+            text="行超宽时 " + ("⌘F" if sys.platform == "darwin" else "Ctrl+F") + " 自动换新篇章",
             variable=self.auto_wrap_var,
         ).pack(side=tk.LEFT, padx=(15, 0))
         
@@ -1163,7 +1232,7 @@ class App:
             bg=line_num_bg,
         )
         self._line_numbers.pack(side=tk.LEFT, fill=tk.Y)
-        # 等宽字体 + 不换行，便于 Ctrl+F 小节对齐
+        # 等宽字体 + 不换行，便于 ⌘F/Ctrl+F 小节对齐
         self.text = scrolledtext.ScrolledText(
             editor_frame,
             wrap=tk.NONE,
@@ -1174,6 +1243,8 @@ class App:
             bg=colors["text_bg"],
             fg=colors["text_fg"],
             insertbackground=colors["text_fg"],
+            undo=True,
+            autoseparators=False,
         )
         hscroll = tk.Scrollbar(main, orient=tk.HORIZONTAL, command=self.text.xview)
         self.text.configure(xscrollcommand=hscroll.set)
@@ -1225,7 +1296,13 @@ class App:
                 self.current_file_path = fallback
             else:
                 self.text.insert(tk.END, SAMPLE_SCORE)
-        self.text.bind("<Control-f>", self._on_align)
+        self.text.edit_reset()
+        def _align_handler(e):
+            self._on_align()
+            return "break"
+        self.text.bind("<Control-f>", _align_handler)
+        if sys.platform == "darwin":
+            self.text.bind("<Command-f>", _align_handler)
         def _edit_bind(seq, handler):
             def _handler(e):
                 handler()
@@ -1237,11 +1314,15 @@ class App:
         _edit_bind("<Control-v>", self._on_paste)
         _edit_bind("<Control-a>", self._on_select_all)
         _edit_bind("<Control-Shift-C>", self._on_copy_all)
+        _edit_bind("<Control-z>", self._on_undo)
+        _edit_bind("<Control-Shift-Z>", self._on_redo)
         if sys.platform == "darwin":
             _edit_bind("<Command-x>", self._on_cut)
             _edit_bind("<Command-c>", self._on_copy_selection)
             _edit_bind("<Command-v>", self._on_paste)
             _edit_bind("<Command-a>", self._on_select_all)
+            _edit_bind("<Command-z>", self._on_undo)
+            _edit_bind("<Command-Shift-Z>", self._on_redo)
         self.root.after(100, self._do_highlights)
         self.root.after(150, self._update_preview)
         self.root.after(200, self._update_duration_buttons_state)
@@ -1310,23 +1391,35 @@ class App:
     def _load_sample(self, text: str):
         self.text.delete(1.0, tk.END)
         self.text.insert(tk.END, text)
+        self.text.edit_reset()
     
     def _on_align(self, event=None):
-        """Ctrl+F: 对齐小节号；勾选时行超宽则自动换新篇章"""
+        """⌘F/Ctrl+F: 对齐小节号；勾选时行超宽则自动换新篇章"""
         content = self.text.get(1.0, tk.END)
         lines = content.split("\n")
-        # 按双换行分篇章
-        sections: list[list[tuple[int, str]]] = []
+        # 按双换行分篇章，保留篇章间的非 & 行（如 \tonality{D}、空行等）
+        # & 或 | 开头的行视为声部内容（| 开头为单声部小节行）
+        header_lines: list[str] = []
+        sections: list[tuple[list[tuple[int, str]], list[str]]] = []
         current: list[tuple[int, str]] = []
+        trailing: list[str] = []
         for i, line in enumerate(lines):
-            if line.strip().startswith("&"):
+            stripped = line.strip()
+            if stripped.startswith("&") or stripped.startswith("|"):
+                if current and trailing:
+                    sections.append((current, trailing))
+                    current = []
+                    trailing = []
+                elif not current:
+                    trailing = []
                 current.append((i, line))
             else:
                 if current:
-                    sections.append(current)
-                    current = []
+                    trailing.append(line)
+                else:
+                    header_lines.append(line)
         if current:
-            sections.append(current)
+            sections.append((current, trailing))
         
         if not sections:
             return "break"
@@ -1420,12 +1513,16 @@ class App:
                     bars = [p.strip() for p in parts[1:-1]]
                 elif parts[-1].rstrip().endswith(")"):
                     suffix = ")"
-                    last_bar = parts[-1].rstrip()[:-1].rstrip()
+                    last_bar = parts[-1].rstrip()[:-1].rstrip().rstrip("|").rstrip()
                     bars = [p.strip() for p in parts[1:-1]] + [last_bar]
                 else:
                     bars = [p.strip() for p in parts[1:] if p.strip()]
             else:
                 bars = [p.strip() for p in parts[1:] if p.strip()]
+            for i in range(len(bars) - 1, -1, -1):
+                if bars[i].strip() and bars[i].rstrip().endswith("|"):
+                    bars[i] = bars[i].rstrip().rstrip("|").rstrip()
+                    break
             return prefix, bars, suffix
         
         def align_section(part_lines: list[tuple[int, str]]) -> list[str]:
@@ -1447,18 +1544,26 @@ class App:
                 sep = " |" if prefix.rstrip().endswith("&") else "|"
                 max_prefix_len = max(max_prefix_len, len(prefix.rstrip()) + len(sep))
             result = []
+            single_voice = len(part_lines) == 1
             for (_, line), (prefix, bars, suffix) in zip(part_lines, all_data):
                 if not bars and max_bars > 0:
                     result.append(line)
                     continue
-                padded = [b.ljust(col_widths[j]) for j, b in enumerate(bars)]
-                sep = " |" if prefix.rstrip().endswith("&") else "|"
-                before_bars = (prefix.rstrip() + sep).ljust(max_prefix_len)
-                result.append(before_bars + "|".join(padded) + suffix)
+                if single_voice:
+                    padded = [b.rstrip() for b in bars]
+                    sep = " |" if prefix.rstrip().endswith("&") else "|"
+                    before_bars = (prefix.rstrip() + sep).ljust(max_prefix_len)
+                    out = before_bars + "|".join(padded) + suffix
+                    result.append(out.rstrip())
+                else:
+                    padded = [b.ljust(col_widths[j]) for j, b in enumerate(bars)]
+                    sep = " |" if prefix.rstrip().endswith("&") else "|"
+                    before_bars = (prefix.rstrip() + sep).ljust(max_prefix_len)
+                    result.append(before_bars + "|".join(padded) + suffix)
             return result
         
-        new_sections: list[list[str]] = []
-        for section in sections:
+        new_sections: list[tuple[list[str], list[str]]] = []
+        for section, sep_lines in sections:
             part_lines = section
             if self.auto_wrap_var.get():
                 any_long = any(len(L) > max_chars for _, L in part_lines)
@@ -1490,27 +1595,44 @@ class App:
                         if t:
                             tail_section.append(prefix.rstrip() + sep + "|".join(t) + suffix)
                     if head_section:
-                        new_sections.append(align_section([(0, s) for s in head_section]))
+                        new_sections.append((align_section([(0, s) for s in head_section]), []))
                     if tail_section:
-                        new_sections.append(align_section([(0, s) for s in tail_section]))
+                        new_sections.append((align_section([(0, s) for s in tail_section]), sep_lines))
                     continue
             aligned = align_section(part_lines)
-            new_sections.append(aligned)
+            new_sections.append((aligned, sep_lines))
         
-        # 重建内容：每篇章内对齐，篇章间双换行，结尾小节号不输出
+        # 重建内容：每篇章内对齐，篇章间插入保留行（如 \tonality），双换行分隔
+        def _normalize_sep(sep: list[str]) -> list[str]:
+            """合并连续空行，避免每次格式化空行增多"""
+            out: list[str] = []
+            prev_blank = False
+            for s in sep:
+                is_blank = not s.strip()
+                if is_blank:
+                    if not prev_blank:
+                        out.append(s)
+                    prev_blank = True
+                else:
+                    out.append(s)
+                    prev_blank = False
+            while out and not out[-1].strip():
+                out.pop()
+            return out
+
         output_blocks = []
-        for block in new_sections:
-            output_blocks.append("\n".join(block))
+        for aligned, sep in new_sections:
+            block = "\n".join(aligned)
+            norm = _normalize_sep(sep)
+            if norm:
+                block += "\n" + "\n".join(norm)
+            output_blocks.append(block)
         new_content = "\n\n".join(output_blocks)
-        header_lines = []
-        for line in lines:
-            if line.strip().startswith("&"):
-                break
-            header_lines.append(line)
         if header_lines:
             new_content = "\n".join(header_lines).rstrip() + "\n\n" + new_content
         self.text.delete(1.0, tk.END)
         self.text.insert(tk.END, new_content)
+        self._undo_separator()
         self._clamp_breakpoints_to_line_count(len(new_content.splitlines()))
         return "break"
     
@@ -2092,6 +2214,18 @@ class App:
         self._redraw_breakpoints()
         self.text.tag_raise("sel")  # 选区显示在高亮之上
     
+    _UNDO_MODIFIER_KEYS = frozenset({
+        "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+        "Meta_L", "Meta_R", "Super_L", "Super_R", "Command", "Caps_Lock", "Num_Lock",
+    })
+
+    def _undo_separator(self):
+        """在撤销栈中插入分隔符，使后续撤销粒度更细"""
+        try:
+            self.text.edit_separator()
+        except tk.TclError:
+            pass
+
     def _on_key_release(self, event=None):
         if self._highlight_timer:
             self.text.after_cancel(self._highlight_timer)
@@ -2100,6 +2234,9 @@ class App:
         self._update_duration_buttons_state()
         self._schedule_auto_save()
         self._schedule_preview()
+        # 每次按键后添加撤销分隔符，使撤销粒度更细（至少每个字符/空格一次）
+        if event and event.keysym not in self._UNDO_MODIFIER_KEYS:
+            self._undo_separator()
     
     def _schedule_auto_save(self):
         """延迟 1.5 秒后自动保存"""
