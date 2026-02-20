@@ -338,6 +338,11 @@ class App:
         
         edit_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="编辑", menu=edit_menu)
+        undo_accel = "⌘Z" if sys.platform == "darwin" else "Ctrl+Z"
+        redo_accel = "⌘⇧Z" if sys.platform == "darwin" else "Ctrl+Shift+Z"
+        edit_menu.add_command(label="撤销", command=self._on_undo, accelerator=undo_accel)
+        edit_menu.add_command(label="恢复", command=self._on_redo, accelerator=redo_accel)
+        edit_menu.add_separator()
         edit_menu.add_command(label="剪切", command=self._on_cut, accelerator="Ctrl+X")
         edit_menu.add_command(label="复制", command=self._on_copy_selection, accelerator="Ctrl+C")
         edit_menu.add_command(label="粘贴", command=self._on_paste, accelerator="Ctrl+V")
