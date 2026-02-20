@@ -81,7 +81,7 @@ def _merge_tied_events(
                         if m not in ev.midis:
                             extra_notes.append((nxt_start, nxt.duration_beats, m))
                     j += 1
-                    break
+                    # 不 break，继续处理后续连音和弦（如 ~x|~x|~x）
                 else:
                     break
             # 琶音 [a]：从低到高快速连续，同时终止
@@ -90,18 +90,29 @@ def _merge_tied_events(
                 delay_beats = 0.05  # 每音间隔约 50ms @ 120bpm
                 sorted_midis = sorted(ev.midis)
                 n = len(sorted_midis)
-                for i, m in enumerate(sorted_midis):
-                    note_start = start_beat + i * delay_beats
-                    note_dur = ev.duration_beats - (n - 1 - i) * delay_beats
+                tied_dur = 0.0
+                for m in ev.midis:
+                    tied_dur = max(tied_dur, merge_dur_by_midi.get(m, 0))
+                # 连音延续：所有音同时结束（chord_end + tied_dur），续时从各音各自结束处开始
+                chord_end = start_beat + ev.duration_beats
+                common_end = chord_end + tied_dur
+                for idx, m in enumerate(sorted_midis):
+                    note_start = start_beat + idx * delay_beats
+                    note_dur = ev.duration_beats - (n - 1 - idx) * delay_beats
                     if note_dur > 0:
                         result.append((note_start, note_dur, [m], vol, False))
+                    if merge_dur_by_midi.get(m, 0) > 0:
+                        note_end = note_start + note_dur
+                        cont_dur = common_end - note_end
+                        if cont_dur > 0:
+                            result.append((note_end, cont_dur, [m], vol, True))
             else:
                 # 和弦整体：各音相同时值
                 result.append((start_beat, ev.duration_beats, list(ev.midis), vol, False))
-            # 连音延续：仅被 tie 的音，从和弦结束后开始，标记 is_continuation
-            for m in ev.midis:
-                if merge_dur_by_midi[m] > 0:
-                    result.append((start_beat + ev.duration_beats, merge_dur_by_midi[m], [m], vol, True))
+                # 连音延续：从和弦结束后开始
+                for m in ev.midis:
+                    if merge_dur_by_midi.get(m, 0) > 0:
+                        result.append((start_beat + ev.duration_beats, merge_dur_by_midi[m], [m], vol, True))
             for nxt_start, nxt_dur, m in extra_notes:
                 result.append((nxt_start, nxt_dur, [m], vol, False))
             i = j
