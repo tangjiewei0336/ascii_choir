@@ -459,8 +459,12 @@ def _parse_notation_scope(
             if tilde_rest:
                 dur = max(0, beats_per_bar - bar_beats)
             return RestEvent(duration_beats=dur)
-        # 剥离升降号前缀；若无显式升降号，则使用小节内该音级已记录的临时记号（五线谱规则）
+        # 先剥离左侧八度点（. 表示低八度），再剥离升降号，否则 .b7 会因 b 在 . 后而漏识别
         core = tok
+        left_dots = right_dots = 0
+        while core.startswith("."):
+            left_dots += 1
+            core = core[1:]
         has_explicit_acc = False
         if core.startswith("#"):
             acc = 1
@@ -473,10 +477,6 @@ def _parse_notation_scope(
         elif core.startswith("^"):
             acc = 2
             has_explicit_acc = True
-            core = core[1:]
-        left_dots = right_dots = 0
-        while core.startswith("."):
-            left_dots += 1
             core = core[1:]
         # 先剥离末尾的 - 和 _，再识别右侧八度点（支持 1.----- 与 1-----.）
         ext = sum(1 for c in core if c == "-")
