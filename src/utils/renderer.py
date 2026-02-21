@@ -8,7 +8,7 @@ from typing import Optional
 
 from PIL import Image
 
-from parser import (
+from src.core.parser import (
     ParsedScore,
     Part,
     BarContent,

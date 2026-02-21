@@ -7,7 +7,7 @@ import tkinter as tk
 from pathlib import Path
 from typing import Callable
 
-from preprocessor import expand_imports, LIB_DIR
+from src.core.preprocessor import expand_imports, LIB_DIR
 
 # 反斜杠命令补全：(名称, 插入内容, 光标偏移) 光标偏移为插入后从末尾回退字符数，便于编辑括号内
 BACKSLASH_COMMANDS = [

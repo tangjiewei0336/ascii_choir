@@ -4,7 +4,7 @@
 import re
 from typing import Optional
 
-from parser import parse_note_part_to_midi, _tonality_to_semitones
+from src.core.parser import parse_note_part_to_midi, _tonality_to_semitones
 
 
 def _get_tonality_offset(content: str) -> int:

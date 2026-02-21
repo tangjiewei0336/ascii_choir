@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 # 库扫描位置：workspaces/lib，\import 在 base_dir 未找到时会在此查找
-LIB_DIR = Path(__file__).resolve().parent / "workspaces" / "lib"
+LIB_DIR = Path(__file__).resolve().parent.parent.parent / "workspaces" / "lib"
 
 
 def expand_imports(content: str, base_dir: Path | None) -> str:

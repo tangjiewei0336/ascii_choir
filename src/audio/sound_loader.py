@@ -32,5 +32,5 @@ def load_sound_library(library_path: str) -> dict[int, str]:
 
 def get_default_sound_path() -> str:
     """获取默认音色库路径（grand_piano）"""
-    base = Path(__file__).parent
+    base = Path(__file__).parent.parent.parent
     return str(base / "sound_library" / "grand_piano")

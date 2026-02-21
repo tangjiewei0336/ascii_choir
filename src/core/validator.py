@@ -5,7 +5,7 @@
 import re
 from dataclasses import dataclass
 
-from parser import (
+from src.core.parser import (
     parse as _parse,
     ParseError,
     ParsedScore,
@@ -83,7 +83,7 @@ def _check_bar_duration(text: str, score) -> list[Diagnostic]:
                 bars_with_expected.append((bar, expected))
 
     # 按 parser 相同的结构遍历：sections -> parts -> bars，与 bars_with_expected 顺序一致
-    from parser import _parse_global, _split_sections
+    from src.core.parser import _parse_global, _split_sections
 
     _, rest = _parse_global(text)
     rest_start = text.find(rest) if rest in text else 0
@@ -244,7 +244,7 @@ def _check_voicevox_connection(text: str) -> tuple[list[Diagnostic], bool]:
     if not _has_voicevox_usage(text):
         return diags, True
     try:
-        from voicevox_client import fetch_singers, VOICEVOX_BASE
+        from src.voice.voicevox_client import fetch_singers, VOICEVOX_BASE
     except ImportError:
         return diags, True
     try:
@@ -259,7 +259,7 @@ def _check_lyrics_singing_support(text: str, score: ParsedScore) -> list[Diagnos
     """检查 \\lyrics 中的 voice_id 是否支持歌唱。连接不上引擎时静默跳过。"""
     diags: list[Diagnostic] = []
     try:
-        from voicevox_client import fetch_singers, VOICEVOX_BASE
+        from src.voice.voicevox_client import fetch_singers, VOICEVOX_BASE
     except ImportError:
         return diags
     try:
@@ -296,7 +296,7 @@ def _check_instrument_range(score: ParsedScore, text: str) -> list[Diagnostic]:
     """检查各声部音符是否在指定乐器音域内。超出则报错。"""
     diags: list[Diagnostic] = []
     try:
-        from instrument_registry import can_play_note, can_play_chord, midi_to_note_name
+        from src.instruments.instrument_registry import can_play_note, can_play_chord, midi_to_note_name
     except ImportError:
         return diags
 

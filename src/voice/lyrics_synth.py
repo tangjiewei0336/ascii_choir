@@ -9,10 +9,10 @@ from typing import Optional
 import numpy as np
 import soundfile as sf
 
-from audio_cache import cache_key_lyrics, get_cached_audio, save_audio_to_cache
-from parser import ParsedScore, NoteEvent, ChordEvent, RestEvent, BarContent
-from scheduler import _align_parts, _get_bar_duration
-from voicevox_client import (
+from src.audio.audio_cache import cache_key_lyrics, get_cached_audio, save_audio_to_cache
+from src.core.parser import ParsedScore, NoteEvent, ChordEvent, RestEvent, BarContent
+from src.core.scheduler import _align_parts, _get_bar_duration
+from src.voice.voicevox_client import (
     sing_frame_audio_query,
     frame_synthesis,
     SING_FRAME_RATE,
@@ -374,8 +374,8 @@ def synthesize_acappella(
     voice_id_override: 若指定，将覆盖简谱中 \\lyrics 的 voice_id（用于在对话框中临时选用音色）
     返回 (audio_float32, duration_seconds) 或 None
     """
-    from validator import parse
-    from scheduler import schedule_segments
+    from src.core.validator import parse
+    from src.core.scheduler import schedule_segments
 
     try:
         parsed = parse(score_text)
@@ -386,7 +386,7 @@ def synthesize_acappella(
         return None
 
     try:
-        from tts_helper import generate_tts_audio
+        from src.voice.tts_helper import generate_tts_audio
     except ImportError:
         def generate_tts_audio(*args, **kwargs):
             return None

@@ -11,7 +11,7 @@ from pathlib import Path
 import os
 import threading
 
-from chord_utils import (
+from src.utils.chord_utils import (
     chord_sort,
     chord_swap_two,
     duration_divide_two,
@@ -20,20 +20,20 @@ from chord_utils import (
     get_chords_to_operate,
     get_tonality_offset,
 )
-from parser import parse
-from player import Player
-from preprocessor import expand_imports
-from renderer import render_to_image, render_to_pil
-from validator import validate, VOICEVOX_UNREACHABLE_MSG
-from breakpoints import load_breakpoints, save_breakpoints, rename_breakpoints
-from voicevox_client import VOICEVOX_BASE
-from progress_window import ProgressWindow
-from autocomplete import (
+from src.core.parser import parse
+from src.audio.player import Player
+from src.core.preprocessor import expand_imports
+from src.utils.renderer import render_to_image, render_to_pil
+from src.core.validator import validate, VOICEVOX_UNREACHABLE_MSG
+from src.utils.breakpoints import load_breakpoints, save_breakpoints, rename_breakpoints
+from src.voice.voicevox_client import VOICEVOX_BASE
+from src.ui.progress_window import ProgressWindow
+from src.ui.autocomplete import (
     get_backslash_suggestions,
     get_bracket_suggestions,
     AutocompletePopup,
 )
-from bar_utils import get_bar_ranges_at_cursor, extract_single_bar_for_preview
+from src.utils.bar_utils import get_bar_ranges_at_cursor, extract_single_bar_for_preview
 
 
 def show_error_detail(parent: tk.Tk, title: str, message: str, traceback_str: str | None = None) -> None:
@@ -253,7 +253,7 @@ BRACKET_COLORS_LIGHT = ["#e8f4e8", "#e8e8f4", "#f4f4e8", "#f4e8f4", "#e8f4f4", "
 BRACKET_COLORS_DARK = ["#1e3d2e", "#1e2e3d", "#3d3d1e", "#3d1e3d", "#1e3d3d", "#3d2e1e"]
 
 # 应用根目录，用于预设工作区
-APP_ROOT = Path(__file__).resolve().parent
+APP_ROOT = Path(__file__).resolve().parent.parent.parent
 WORKSPACES_DIR = APP_ROOT / "workspaces"
 EXAMPLE_WORKSPACE = WORKSPACES_DIR / "示例"
 
@@ -537,7 +537,7 @@ class App:
 
         def run():
             try:
-                from export_mp3 import export_audio_to_mp3
+                from src.audio.export_mp3 import export_audio_to_mp3
 
                 self.player.set_progress_callback(progress_cb)
                 result = self.player.render_audio(content)
@@ -768,7 +768,7 @@ class App:
     def _on_voicevox_voices(self):
         """打开 VOICEVOX 音色选择对话框（音色列表 + 利用規約 + 试听 + 清唱生成）"""
         try:
-            from voicevox_voice_dialog import show_voicevox_dialog
+            from src.voice.voicevox_voice_dialog import show_voicevox_dialog
             get_score = lambda: self.text.get(1.0, tk.END)
             get_current_file = lambda: self.current_file_path
             show_voicevox_dialog(self.root, get_score_callback=get_score, get_current_file_callback=get_current_file)
@@ -779,7 +779,7 @@ class App:
     def _on_instrument_panel(self):
         """打开乐器面板对话框"""
         try:
-            from instrument_dialog import show_instrument_dialog
+            from src.instruments.instrument_dialog import show_instrument_dialog
             insert_cb = lambda s: self.text.insert(tk.INSERT, s)
             content = self.text.get("1.0", tk.END)
             tonality = get_tonality_offset(content)
@@ -864,7 +864,7 @@ class App:
     def _on_cache_settings(self):
         """打开缓存设置对话框"""
         try:
-            from audio_cache import (
+            from src.audio.audio_cache import (
                 clear_cache,
                 get_cache_size_limit_mb,
                 get_cache_size_mb,
@@ -2058,7 +2058,7 @@ class App:
 
         def _fetch():
             try:
-                from voicevox_client import fetch_speakers, fetch_singers, fetch_speaker_info, resolve_speakers_style_id
+                from src.voice.voicevox_client import fetch_speakers, fetch_singers, fetch_speaker_info, resolve_speakers_style_id
                 base = VOICEVOX_BASE
                 singers = fetch_singers(base)
                 uuid_val = None
@@ -2080,7 +2080,7 @@ class App:
                             break
                 if not uuid_val:
                     return
-                from voicevox_client import resolve_speakers_style_id
+                from src.voice.voicevox_client import resolve_speakers_style_id
                 match_id = resolve_speakers_style_id(style_id, base) or style_id
                 for fmt in ("url", "base64"):
                     try:
@@ -2096,7 +2096,7 @@ class App:
                             portrait = info["style_infos"][0].get("portrait", "")
                         if portrait:
                             is_url = fmt == "url" and (portrait.startswith("http://") or portrait.startswith("https://"))
-                            from voicevox_voice_dialog import _load_portrait_image
+                            from src.voice.voicevox_voice_dialog import _load_portrait_image
                             img = _load_portrait_image(portrait, is_url, (64, 64))
                             if img:
                                 rid = request_id

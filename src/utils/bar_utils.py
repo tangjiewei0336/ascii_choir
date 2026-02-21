@@ -3,7 +3,7 @@
 """
 import re
 
-from parser import _parse_global, _split_sections
+from src.core.parser import _parse_global, _split_sections
 
 
 def _pipe_positions_at_depth_zero(line: str) -> list[int]:

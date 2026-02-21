@@ -17,8 +17,8 @@ def main():
     if not path.exists():
         print(f"   跳过: 文件不存在 {path}")
     else:
-        from parser import parse
-        from scheduler import schedule_segments
+        from src.core.parser import parse
+        from src.core.scheduler import schedule_segments
         text = path.read_text(encoding="utf-8")
         score = parse(text)
         segs = schedule_segments(score)
@@ -40,7 +40,7 @@ def main():
         return 0  # 解析部分已通过
 
     print("\n3. 测试 generate_tts_audio (需要网络)...")
-    from tts_helper import generate_tts_audio
+    from src.voice.tts_helper import generate_tts_audio
     result = generate_tts_audio("Hello.", "en-US", 44100)
     if result is None:
         print("   失败: 返回 None（检查网络或 ffmpeg）")

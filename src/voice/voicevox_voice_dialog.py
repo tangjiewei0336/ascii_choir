@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-from voicevox_client import (
+from src.voice.voicevox_client import (
     fetch_speakers,
     fetch_speaker_info,
     fetch_singers,
@@ -373,7 +373,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
     def _on_error(self, msg: str, tb: str = "") -> None:
         self._status.config(text="")
         try:
-            from gui import show_error_detail
+            from src.ui.gui import show_error_detail
             show_error_detail(self, "VOICEVOX 连接失败", msg, tb if tb else None)
         except ImportError:
             messagebox.showerror("VOICEVOX 连接失败", msg + (f"\n\n{tb}" if tb else ""))
@@ -472,7 +472,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
     def _on_preview_error(self, msg: str, tb: str = "") -> None:
         self._status.config(text="")
         try:
-            from gui import show_error_detail
+            from src.ui.gui import show_error_detail
             show_error_detail(self, "试听失败", msg, tb if tb else None)
         except ImportError:
             messagebox.showerror("试听失败", msg + (f"\n\n{tb}" if tb else ""))
@@ -531,7 +531,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
             try:
                 import traceback
                 import soundfile as sf
-                from lyrics_synth import synthesize_acappella
+                from src.voice.lyrics_synth import synthesize_acappella
                 result = synthesize_acappella(
                     score_text, sample_rate=44100, voice_id_override=voice_id, base_url=self.base_url
                 )
@@ -555,7 +555,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         self._status.config(text="")
         if err:
             try:
-                from gui import show_error_detail
+                from src.ui.gui import show_error_detail
                 show_error_detail(self, "清唱生成失败", err, tb)
             except ImportError:
                 messagebox.showerror("清唱生成失败", err + (f"\n\n{tb}" if tb else ""))

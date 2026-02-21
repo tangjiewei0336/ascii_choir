@@ -2,7 +2,7 @@
 事件调度器：将解析结果转为时间轴上的音符事件，支持多声部同步
 """
 from dataclasses import dataclass, field
-from parser import ParsedScore, NoteEvent, ChordEvent, RestEvent, BarContent, Part, TTSEvent, GlissEvent
+from src.core.parser import ParsedScore, NoteEvent, ChordEvent, RestEvent, BarContent, Part, TTSEvent, GlissEvent
 
 
 @dataclass

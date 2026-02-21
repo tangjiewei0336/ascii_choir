@@ -8,7 +8,7 @@ from tkinter import ttk, scrolledtext, messagebox
 from pathlib import Path
 from typing import Callable
 
-from instrument_registry import (
+from src.instruments.instrument_registry import (
     get_all_instruments,
     can_play_note,
     can_play_chord,
@@ -17,7 +17,7 @@ from instrument_registry import (
     midi_to_simplified_notation,
     parse_note_or_chord_input,
 )
-from sound_loader import load_sound_library
+from src.audio.sound_loader import load_sound_library
 
 # 乐器显示名
 INSTRUMENT_DISPLAY_NAMES = {
@@ -179,7 +179,7 @@ def show_instrument_dialog(
         info = instruments[inst_id]
         path = info["path"]
         if inst_id == "guitar":
-            from instrument_registry import select_guitar_string_for_note
+            from src.instruments.instrument_registry import select_guitar_string_for_note
             sid = select_guitar_string_for_note(midi)
             if sid:
                 key = f"guitar_string_{sid}"

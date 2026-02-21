@@ -8,7 +8,7 @@ from typing import Optional
 
 import numpy as np
 
-from audio_cache import cache_key_tts, get_cached_audio, save_audio_to_cache
+from src.audio.audio_cache import cache_key_tts, get_cached_audio, save_audio_to_cache
 
 # 语言 -> edge-tts 语音
 VOICE_MAP = {
@@ -36,7 +36,7 @@ def generate_tts_audio(
 
     if voice_id is not None:
         try:
-            from voicevox_client import synthesize_simple, resolve_speakers_style_id, VOICEVOX_BASE
+            from src.voice.voicevox_client import synthesize_simple, resolve_speakers_style_id, VOICEVOX_BASE
             speaker_id = resolve_speakers_style_id(voice_id, VOICEVOX_BASE) or voice_id
             wav_bytes = synthesize_simple(text, speaker_id, VOICEVOX_BASE)
             import io

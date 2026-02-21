@@ -3,7 +3,7 @@
 """
 import numpy as np
 
-from audio_cache import (
+from src.audio.audio_cache import (
     cache_key_lyrics,
     cache_key_play,
     get_cached_audio,
@@ -14,19 +14,19 @@ import sounddevice as sd
 from pathlib import Path
 from typing import Callable, Optional
 
-from sound_loader import load_sound_library, get_default_sound_path
-from instrument_registry import get_instrument_path_for_note
-from scheduler import ScheduledNote, schedule, schedule_segments, ScheduledSegment
-from validator import parse
+from src.audio.sound_loader import load_sound_library, get_default_sound_path
+from src.instruments.instrument_registry import get_instrument_path_for_note
+from src.core.scheduler import ScheduledNote, schedule, schedule_segments, ScheduledSegment
+from src.core.validator import parse
 
 try:
-    from tts_helper import generate_tts_audio
+    from src.voice.tts_helper import generate_tts_audio
 except ImportError:
     def generate_tts_audio(*args, **kwargs):
         return None
 
 try:
-    from lyrics_synth import synthesize_lyrics, has_lyrics_voice, get_lyrics_part_indices
+    from src.voice.lyrics_synth import synthesize_lyrics, has_lyrics_voice, get_lyrics_part_indices
 except ImportError:
     def synthesize_lyrics(*args, **kwargs):
         return None
@@ -156,7 +156,7 @@ class Player:
             for midi in n.midis:
                 wav = self._load_wav(midi, instrument=inst, chord_midis=chord_midis)
                 if wav is None:
-                    from instrument_registry import midi_to_note_name
+                    from src.instruments.instrument_registry import midi_to_note_name
                     note_name = midi_to_note_name(midi)
                     chord_str = f" 和弦 {', '.join(midi_to_note_name(m) for m in chord_midis)}" if chord_midis else ""
                     raise RuntimeError(
