@@ -36,6 +36,8 @@ INSTRUMENT_DISPLAY_NAMES = {
     "guitar_string_g": "吉他弦 G",
     "guitar_string_b": "吉他弦 B",
     "drums": "鼓",
+    "guitar_electrical": "电吉他",
+    "bass_electrical": "电贝斯",
 }
 
 # GM 鼓表：MIDI -> (名称, 象声词)

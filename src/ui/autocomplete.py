@@ -24,7 +24,7 @@ BACKSLASH_COMMANDS = [
 # 方括号补全：乐器 + 记号。需作用域的记号补全时带 () 及光标偏移
 BRACKET_INSTRUMENTS = [
     "grand_piano", "piano", "violin", "cello", "trumpet", "clarinet",
-    "oboe", "alto_sax", "tenor_sax", "bass", "guitar", "drums",
+    "oboe", "alto_sax", "tenor_sax", "bass", "guitar", "drums", "guitar_electrical", "bass_electrical"
 ]
 BRACKET_NOTATIONS = [
     "8vb", "8va", "15va", "15vb",
