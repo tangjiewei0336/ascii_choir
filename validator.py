@@ -264,7 +264,7 @@ def _check_lyrics_singing_support(text: str, score: ParsedScore) -> list[Diagnos
     section_lyrics = getattr(score, "section_lyrics", None) or []
     unsupported: list[int] = []
     for sec in section_lyrics:
-        for _part_idx, _syllables, voice_id, _melody in sec:
+        for _part_idx, _syllables, voice_id, _melody, *_ in sec:
             if voice_id is not None and voice_id not in singing_ids and voice_id not in unsupported:
                 unsupported.append(voice_id)
     if not unsupported:

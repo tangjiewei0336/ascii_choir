@@ -52,10 +52,11 @@ brew install ffmpeg
 4. 升降号技能调整
 - [deviation explicit on] 启用还原号。
 - [deviation explicit off] 关闭还原号。此时升降号只作用于单音，不持续。
-5. 偏移记号`[#va]`
+5. 八度记号
 - [8va] 高八度（ottava alta），将括号内音符整体升高一个八度
 - [8vb] 低八度（ottava bassa），将括号内音符整体降低一个八度
 - [15va] 高两个八度（quindicesima），将括号内音符整体升高两个八度
+- [15vb] 低两个八度，将括号内音符整体降低两个八度
 6. 琶音装饰`[a]` / `[arpeggio]`
 - 快速连续弹奏多个音符，从最低音开始，同时终止。无括号时只作用于右边第一个音（单音或和弦）；有括号 `[a](...)` 则作用于括号内所有音。
 
@@ -257,6 +258,7 @@ brew install ffmpeg
 - `\lyrics{...}{part_index}`：**声部索引**，指定歌词追加到第几个声部（0 起）。多声部时，0=第一行旋律，1=第二行旋律，以此类推
 - `\lyrics{...}{part_index}{voice_id}`：voice_id 为 VOICEVOX style_id（可选）。**有 voice_id 时播放会用 VOICEVOX 歌唱合成歌声**，替代 WAV 音色
 - `\lyrics{...}{part_index}{voice_id}{melody}`：**melody** 为和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
+- `\lyrics{...}{part_index}{voice_id}{melody}{volume}`：**volume** 为歌声音量 0–100，默认 60
 - 行内歌词：`1(啊) 2(一)` 在音符后加括号（未测试！！）
 
 ```text
@@ -267,11 +269,12 @@ brew install ffmpeg
 |1 2 3 4|5 6 7 1|
 ```
 
-多声部示例（`\lyrics{音节}{part_index}{voice_id}{melody}` 四个参数依次为）：
+多声部示例（`\lyrics{音节}{part_index}{voice_id}{melody}{volume}` 五个参数依次为）：
 - **音节**：斜杠分隔的字，与音符一一对齐
 - **part_index**：声部索引（0 起），0=第一行旋律，1=第二行旋律
 - **voice_id**：VOICEVOX 的 style_id，有则用歌唱合成；可省略
 - **melody**：和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
+- **volume**：歌声音量 0–100，默认 60
 
 ```text
 \tonality{0}
@@ -289,6 +292,42 @@ brew install ffmpeg
 \lyrics{高/高/音/音/唱/唱}{0}{5}{1}   // melody=1：取各和弦第二音 3、4、5、6、7、1.
 & |1/3 2/4 3/5|4/6 5/7 6/1.|
 ```
+
+### 音色与乐器
+行首 `[cello]`、`[guitar]`、`[drums]` 等指定该声部乐器。鼓声部 `[drums]` 使用 GM 打击乐映射，鼓声库需先运行 `sound_library/build_drums.py` 从原始素材生成。
+
+#### GM 鼓表（[drums] 声部 MIDI 映射）
+
+鼓声部使用与旋律一致的简谱格式（`.1`、`.2`、`..#4` 等），便于对齐。C 大调（`\tonality{0}`）下示例：
+
+| MIDI | 名称 | 简谱（tonality 0） |
+|------|------|-------------------|
+| 28 | Slap（鼓棒） | ...3 |
+| 31 | Sticks（鼓棒） | ...5 |
+| 35 | Acoustic Bass Drum | ...7 |
+| 36 | Bass Drum 1 | ..1 |
+| 37 | Side Stick（鼓棒敲边） | ..#1 |
+| 38 | Acoustic Snare | ..2 |
+| 39 | Hand Clap | ..#2 |
+| 40 | Electric Snare | ..3 |
+| 41 | Low Floor Tom | ..4 |
+| 42 | Closed Hi-Hat | ..#4 |
+| 43 | High Floor Tom | ..5 |
+| 44 | Pedal Hi-Hat | ..#5 |
+| 45 | Low Tom | ..6 |
+| 46 | Open Hi-Hat | ..#6 |
+| 47 | Low-Mid Tom | ..7 |
+| 48 | Hi-Mid Tom | .1 |
+| 49 | Crash Cymbal 1 | .#1 |
+| 50 | High Tom | .2 |
+| 51 | Ride Cymbal 1 | .#2 |
+| 52 | Chinese Cymbal | .3 |
+| 53 | Ride Bell | .4 |
+| 55 | Splash Cymbal | .5 |
+| 57 | Crash Cymbal 2 | .6 |
+| 59 | Ride Cymbal 2 | .7 |
+
+**说明**：鼓音使用简谱数字（含 `.`、`..`、`#`、`b`），与旋律记谱一致，便于多声部对齐。鼓声部**不受 `\tonality` 控制**，始终按 C 大调映射（如 `.1`=C、`.6`=A）。
 
 ### 导入文件（\import）
 `\import{文件名}` 在播放前会被自动展开为对应文件的内容，用于模块化组织简谱。
@@ -315,12 +354,12 @@ TTS 菜单 → **VOICEVOX 音色选择** 可打开音色对话框：
 - 左侧：扁平音色列表，**点击即试听**
 - 右侧：选中音色的全身照与利用規約
 - **复制 TTS 命令**：将 `\tts{こんにちは}{ja}{style_id}` 复制到剪贴板
-- **复制 歌词命令**：将 `\lyrics{字/字}{0}{style_id}{0}` 复制到剪贴板
+- **复制 歌词命令**：将 `\lyrics{字/字}{0}{style_id}{0}` 复制到剪贴板（可追加 `{60}` 设置音量）
 - **清唱生成**：用当前选中音色将当前编辑器中的简谱合成为歌声（无 WAV 伴奏），直接播放
 
 使用前需启动 voicevox_engine（默认 http://127.0.0.1:50021）。
 
-**歌词歌声合成**：当 `\lyrics{...}{part}{voice_id}{melody}` 中指定了 voice_id 时，播放该篇章会用 VOICEVOX 歌唱 API 合成歌声。**注意**：歌唱仅支持 `/singers` 中的角色（如波音リツ），若所选音色不支持歌唱，程序会自动使用可用的歌唱角色。
+**歌词歌声合成**：当 `\lyrics{...}{part}{voice_id}{melody}{volume}` 中指定了 voice_id 时，播放该篇章会用 VOICEVOX 歌唱 API 合成歌声。volume 可选，默认 60。**注意**：歌唱仅支持 `/singers` 中的角色（如波音リツ），若所选音色不支持歌唱，程序会自动使用可用的歌唱角色。
 
 ## 编辑器功能
 

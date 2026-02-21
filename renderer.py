@@ -102,7 +102,7 @@ def _assign_lyrics_to_notes(
         sec_settings = section_settings[sec_idx] if sec_idx < len(section_settings) else score.settings
         base_dur = 1.0 / sec_settings.beat_denominator
         base_durations.append(base_dur)
-        for part_idx, s, _, _ in sec_lyrics:
+        for part_idx, s, _, _, _ in sec_lyrics:
             if part_idx not in overflow_queues:
                 overflow_queues[part_idx] = []
             overflow_queues[part_idx].extend(s)

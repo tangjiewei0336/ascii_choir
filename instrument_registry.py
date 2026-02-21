@@ -44,6 +44,9 @@ def get_all_instruments() -> dict[str, dict]:
         # 跳过 build 脚本输出目录、原始素材等
         if name in ("guitar_raw", "Musical Singal Notes") or name.startswith("."):
             continue
+        # 跳过鼓声库原始目录（需先运行 build_drums.py 生成 drums）
+        if name.startswith("16665__"):
+            continue
         if name.startswith("guitar_string_"):
             # 吉他弦：单独记录，同时汇总到 guitar
             string_id = name.replace("guitar_string_", "")
@@ -233,6 +236,27 @@ def midi_to_note_name(midi: int) -> str:
     octave = midi // 12 - 1
     note = names[midi % 12]
     return f"{note}{octave}"
+
+
+# 简谱级数 1-7 对应 C D E F G A B 的 pitch class
+_PC_TO_DEGREE = {0: 1, 1: 1, 2: 2, 3: 2, 4: 3, 5: 4, 6: 4, 7: 5, 8: 5, 9: 6, 10: 6, 11: 7}
+
+
+def midi_to_simplified_notation(midi: int, tonality_offset: int = 0) -> str:
+    """
+    MIDI 转简谱格式，如 36 -> ..1，48 -> .1，60 -> 1。
+    用于鼓声部等，输出 .1 .2 .3 这类纯数字格式，便于对齐。
+    """
+    base = midi - tonality_offset
+    pc = base % 12
+    octave = base // 12
+    # C4=60 对应 octave 5，简谱 1 无点；每低一档 octave 加一个下点
+    ref_octave = 5  # 1 无点
+    octave_diff = ref_octave - octave
+    degree = _PC_TO_DEGREE.get(pc, 1)
+    acc = "#" if pc in (1, 3, 6, 8, 10) else ""
+    dots = "." * max(0, octave_diff)
+    return f"{dots}{acc}{degree}"
 
 
 def note_name_to_midi(s: str) -> Optional[int]:

@@ -42,7 +42,6 @@ VOLUME_MAP = {
     "fff": 1.0, "ff": 0.9, "f": 0.8, "mf": 0.7, "mp": 0.5, "p": 0.4, "pp": 0.3, "ppp": 0.2,
 }
 
-
 @dataclass
 class GlobalSettings:
     tonality: str = "0"
@@ -102,7 +101,7 @@ class TTSEvent:
 
 
 # [cello][guitar] 等乐器标记：对当前行及后续篇章同一声部生效
-VALID_INSTRUMENT_TAGS = {"grand_piano", "piano", "violin", "cello", "trumpet", "clarinet", "oboe", "alto_sax", "tenor_sax", "bass", "guitar"}
+VALID_INSTRUMENT_TAGS = {"grand_piano", "piano", "violin", "cello", "trumpet", "clarinet", "oboe", "alto_sax", "tenor_sax", "bass", "guitar", "drums"}
 
 
 def _strip_instrument_tag(line: str) -> tuple[str, Optional[str]]:
@@ -129,7 +128,7 @@ class ParsedScore:
     sections: list[list[Part]] = field(default_factory=list)  # 篇章列表，每篇章 & 数量相同
     section_settings: list[GlobalSettings] = field(default_factory=list)  # 每篇章的独立设定（覆盖前面的）
     section_tts: list[list[TTSEvent]] = field(default_factory=list)  # 每篇章前的 TTS，section_tts[i] 在 section i 之前播放
-    section_lyrics: list[list[tuple[int, list[str], Optional[int], int]]] = field(default_factory=list)  # 每篇章的 \lyrics{(part_index, syllables, voice_id?, melody_part)}
+    section_lyrics: list[list[tuple[int, list[str], Optional[int], int, int]]] = field(default_factory=list)  # 每篇章的 \lyrics{(part_index, syllables, voice_id?, melody_part, volume)}
     section_part_instruments: list[dict[int, str]] = field(default_factory=list)  # 每篇章每声部的乐器，part_index -> instrument
 
 
@@ -680,12 +679,14 @@ def _parse_notation_scope(
             inner = content[i + 1 : end_p]
             after = content[end_p + 1 :].lstrip()
             n_val = 3  # 默认三连音（有显式 n 时用）
-            apply_underscore = False
+            underscore_count = 0  # )_ 一个，)__ 两个，每个缩短一半
             has_explicit_n = False
             if after and after[0] == "_":
-                # (notes)_：均分后整体缩短一半
-                apply_underscore = True
-                i = end_p + 1 + 1  # consume )_
+                j = 0
+                while j < len(after) and after[j] == "_":
+                    j += 1
+                underscore_count = j
+                i = end_p + 1 + j  # consume )_
             elif after and after[0].isdigit():
                 j = 0
                 while j < len(after) and after[j].isdigit():
@@ -726,11 +727,11 @@ def _parse_notation_scope(
                     elif ev and isinstance(ev, RestEvent):
                         notes_in_tuplet.append(("rest", [], ev.duration_beats, tied_from_prev))
             if notes_in_tuplet:
-                # 均分为 default；(notes)_：每个音为八分；(notes)n：显式 n
+                # 均分为 default；(notes)_：每个音为八分；(notes)__：再缩短一半，依此类推
                 if not has_explicit_n:
                     n_val = len(notes_in_tuplet)
-                if apply_underscore:
-                    each = base_duration / 2  # _ 等同于填写2，四分除以2=八分
+                if underscore_count > 0:
+                    each = base_duration / (2**underscore_count)  # _ 一次缩短一半，__ 两次
                 else:
                     each = base_duration / n_val
                 # 连续连音线 ~3. ~3. 时，第一个 ~ 需连到括号前音符
@@ -1056,13 +1057,15 @@ def _split_sections(text: str) -> list[list[str]]:
         sections.append((block, part_lines))
     return sections
 
-def _extract_lyrics(content: str) -> tuple[str, list[tuple[int, list[str], Optional[int], int]]]:
+def _extract_lyrics(content: str) -> tuple[str, list[tuple[int, list[str], Optional[int], int, int]]]:
     """
-    从 content 中提取 \\lyrics{...}、\\lyrics{...}{part_index}、\\lyrics{...}{part_index}{voice_id}、\\lyrics{...}{part_index}{voice_id}{melody}。
-    返回 (剩余内容, [(part_index, syllables, voice_id, melody_part)])。
+    从 content 中提取 \\lyrics{...}、\\lyrics{...}{part_index}、\\lyrics{...}{part_index}{voice_id}、
+    \\lyrics{...}{part_index}{voice_id}{melody}、\\lyrics{...}{part_index}{voice_id}{melody}{volume}。
+    返回 (剩余内容, [(part_index, syllables, voice_id, melody_part, volume)])。
     melody_part: 0=第一音旋律 1=第二音旋律（和声时）
+    volume: 音量 0–100，默认 60
     """
-    result: list[tuple[int, list[str], Optional[int], int]] = []
+    result: list[tuple[int, list[str], Optional[int], int, int]] = []
     rest = content
 
     def replacer(m: re.Match) -> str:
@@ -1070,6 +1073,7 @@ def _extract_lyrics(content: str) -> tuple[str, list[tuple[int, list[str], Optio
         part_str = m.group(2)
         voice_str = m.group(3)
         melody_str = m.group(4)
+        volume_str = m.group(5)
         part_index = int(part_str.strip()) if part_str else 0
         voice_id = None
         if voice_str:
@@ -1085,12 +1089,19 @@ def _extract_lyrics(content: str) -> tuple[str, list[tuple[int, list[str], Optio
                     melody_part = 0
             except ValueError:
                 pass
+        volume = 60
+        if volume_str is not None:
+            try:
+                v = int(volume_str.strip())
+                volume = max(0, min(100, v))
+            except ValueError:
+                pass
         syllables = [s.strip() for s in text.split("/") if s.strip()]
         if syllables:
-            result.append((part_index, syllables, voice_id, melody_part))
+            result.append((part_index, syllables, voice_id, melody_part, volume))
         return ""
 
-    pattern = re.compile(r"\\lyrics\{([^{}]*)\}(?:\{(\d+)\})?(?:\{([^{}]+)\})?(?:\{([01])\})?\s*", re.I)
+    pattern = re.compile(r"\\lyrics\{([^{}]*)\}(?:\{(\d+)\})?(?:\{([^{}]+)\})?(?:\{([01])\})?(?:\{(\d+)\})?\s*", re.I)
     new_content = pattern.sub(replacer, rest)
     return new_content, result
 
@@ -1185,7 +1196,7 @@ def parse(text: str) -> ParsedScore:
     sections: list[list[Part]] = []
     section_settings_list: list[GlobalSettings] = []
     section_tts_list: list[list[TTSEvent]] = []
-    section_lyrics_list: list[list[tuple[int, list[str], Optional[int], int]]] = []
+    section_lyrics_list: list[list[tuple[int, list[str], Optional[int], int, int]]] = []
     section_part_instruments_list: list[dict[int, str]] = []
     pending_tts: list[TTSEvent] = []
     inherit = settings
@@ -1238,13 +1249,17 @@ def parse(text: str) -> ParsedScore:
         for part_idx, line in enumerate(part_lines):
             if line.strip().startswith("&"):
                 line = line.strip()[1:].lstrip()
-            # 剥离行首 [cello][guitar] 等乐器标记
+            # 剥离行首 [cello][guitar][drums] 等乐器标记
             line, inst_tag = _strip_instrument_tag(line)
+            if "[drums]" in line.lower():
+                inst_tag = inst_tag or "drums"
             if inst_tag:
                 part_instruments[part_idx] = inst_tag
+            # 鼓不受 tonality 控制，始终用 C 大调映射
+            effective_tonality = 0 if inst_tag == "drums" else tonality_offset
             prev_bars = prev_bars_per_part[part_idx] if part_idx < len(prev_bars_per_part) else None
             part, _ = _parse_part_line(
-                line, base_duration, beats_per_bar, sec_settings.no_bar_check, tonality_offset, prev_bars,
+                line, base_duration, beats_per_bar, sec_settings.no_bar_check, effective_tonality, prev_bars,
             )
             if part.bars:
                 sec_parts.append(part)

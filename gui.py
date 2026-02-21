@@ -28,6 +28,11 @@ from validator import validate, VOICEVOX_UNREACHABLE_MSG
 from breakpoints import load_breakpoints, save_breakpoints, rename_breakpoints
 from voicevox_client import VOICEVOX_BASE
 from progress_window import ProgressWindow
+from autocomplete import (
+    get_backslash_suggestions,
+    get_bracket_suggestions,
+    AutocompletePopup,
+)
 
 
 def show_error_detail(parent: tk.Tk, title: str, message: str, traceback_str: str | None = None) -> None:
@@ -772,7 +777,10 @@ class App:
         """打开乐器面板对话框"""
         try:
             from instrument_dialog import show_instrument_dialog
-            show_instrument_dialog(self.root)
+            insert_cb = lambda s: self.text.insert(tk.INSERT, s)
+            content = self.text.get("1.0", tk.END)
+            tonality = get_tonality_offset(content)
+            show_instrument_dialog(self.root, insert_callback=insert_cb, tonality_offset=tonality)
         except ImportError as e:
             import traceback
             show_error_detail(self.root, "错误", f"无法加载乐器面板: {e}", traceback.format_exc())
@@ -1410,7 +1418,12 @@ class App:
         self.root.after(100, self._do_highlights)
         self.root.after(150, self._update_preview)
         self.root.after(200, self._update_duration_buttons_state)
+        self.text.bind("<KeyPress>", self._on_key_press, add="+")
         self.text.bind("<KeyRelease>", self._on_key_release)
+        self.text.bind("<Up>", self._on_autocomplete_nav, add="+")
+        self.text.bind("<Down>", self._on_autocomplete_nav, add="+")
+        self.text.bind("<Return>", self._on_autocomplete_return, add="+")
+        self.text.bind("<Escape>", self._on_autocomplete_escape, add="+")
         self.text.bind("<ButtonRelease-1>", self._on_text_button_release)
         self.text.bind("<Button-3>", self._on_text_context_menu)
         self.text.bind("<Button-2>", self._on_text_context_menu)  # macOS 右键
@@ -1453,7 +1466,9 @@ class App:
         self._bar_check_enabled = True  # \no_bar_check 时可关闭
         self._highlight_timer = None
         self._auto_save_timer = None
-        
+        self._autocomplete_popup: AutocompletePopup | None = None
+        self._autocomplete_timer = None
+
         self._update_diagnostics()
     
     def _theme_colors(self) -> dict:
@@ -1876,8 +1891,8 @@ class App:
         self._bp_tooltip_lbl.config(text=text)
         self._bp_tooltip.deiconify()
         try:
-            rx = self._breakpoint_gutter.winfo_rootx() + x + 14
-            ry = self._breakpoint_gutter.winfo_rooty() + y + 4
+            rx = self._breakpoint_gutter.winfo_rootx() + x + 6
+            ry = self._breakpoint_gutter.winfo_rooty() + y + 2
             self._bp_tooltip.geometry(f"+{rx}+{ry}")
         except tk.TclError:
             pass
@@ -1996,8 +2011,8 @@ class App:
         self._text_tooltip_lbl.config(text=text)
         self._text_tooltip_lbl.pack()
         try:
-            rx = self.text.winfo_rootx() + event.x + 16
-            ry = self.text.winfo_rooty() + event.y + 20
+            rx = self.text.winfo_rootx() + event.x + 6
+            ry = self.text.winfo_rooty() + event.y + 8
             self._text_tooltip.deiconify()
             self._text_tooltip.geometry(f"+{rx}+{ry}")
         except tk.TclError:
@@ -2310,6 +2325,66 @@ class App:
         except tk.TclError:
             pass
 
+    def _get_prev_section_voice_prefixes(self, content_before_cursor: str) -> list[str] | None:
+        """从上一乐章提取各声部「从 & 到第一个 |」的头部。若不在新乐章开头或上一乐章无 & 行则返回 None。"""
+        idx = content_before_cursor.rfind("\n\n")
+        if idx == -1:
+            return None
+        remainder = content_before_cursor[idx + 2 :]
+        if remainder.strip():
+            return None
+        prev_section = content_before_cursor[:idx]
+        last_sec_start = prev_section.rfind("\n\n")
+        prev_section = prev_section[last_sec_start + 2 :] if last_sec_start != -1 else prev_section
+        prefixes: list[str] = []
+        for line in prev_section.split("\n"):
+            stripped = line.strip()
+            if not stripped.startswith("&"):
+                continue
+            pipe_pos = stripped.find("|")
+            if pipe_pos == -1:
+                continue
+            prefix = stripped[: pipe_pos + 1]
+            prefixes.append(prefix)
+        return prefixes if prefixes else None
+
+    _BRACKET_PAIRS = {"(": "()", ")": "()", "[": "[]", "]": "[]", "{": "{}", "}": "{}"}
+
+    def _on_key_press(self, event):
+        """选中内容时输入括号：在两侧加对称括号；双换行后输入 & 时复刻上一乐章头部"""
+        if not (event.state & (0x1 | 0x4 | 0x8)):
+            pair = self._BRACKET_PAIRS.get(event.char)
+            if pair:
+                try:
+                    sel_first = self.text.index(tk.SEL_FIRST)
+                    sel_last = self.text.index(tk.SEL_LAST)
+                except tk.TclError:
+                    sel_first = sel_last = None
+                if sel_first and sel_last:
+                    sel_text = self.text.get(sel_first, sel_last)
+                    wrapped = pair[0] + sel_text + pair[1]
+                    self.text.delete(sel_first, sel_last)
+                    self.text.insert(sel_first, wrapped)
+                    self.text.mark_set("insert", f"{sel_first}+{len(pair[0]) + len(sel_text)}c")
+                    return "break"
+        if event.char != "&" or event.state & (0x4 | 0x8):
+            return
+        content = self.text.get("1.0", tk.END)
+        insert_idx = self.text.index("insert")
+        cursor_pos = len(self.text.get("1.0", insert_idx))
+        before = content[:cursor_pos]
+        prefixes = self._get_prev_section_voice_prefixes(before)
+        if not prefixes:
+            return
+        repl = "\n".join(prefixes)
+        start = self.text.index("insert")
+        self.text.insert("insert", repl)
+        first_line_end = repl.find("\n")
+        if first_line_end < 0:
+            first_line_end = len(repl)
+        self.text.mark_set("insert", f"{start}+{first_line_end}c")
+        return "break"
+
     def _on_key_release(self, event=None):
         if self._highlight_timer:
             self.text.after_cancel(self._highlight_timer)
@@ -2321,7 +2396,117 @@ class App:
         # 每次按键后添加撤销分隔符，使撤销粒度更细（至少每个字符/空格一次）
         if event and event.keysym not in self._UNDO_MODIFIER_KEYS:
             self._undo_separator()
-    
+        # 输入补全：\ 或 [ 后弹出候选（跳过导航键，否则会重置选中项）
+        if event and event.keysym not in ("Up", "Down", "Return", "Escape"):
+            self._try_autocomplete(event)
+
+    def _try_autocomplete(self, event=None):
+        """检测 \\ 或 [ 后弹出/更新补全列表"""
+        if self._autocomplete_timer:
+            self.text.after_cancel(self._autocomplete_timer)
+        self._autocomplete_timer = self.text.after(80, self._do_autocomplete)
+
+    def _do_autocomplete(self):
+        self._autocomplete_timer = None
+        content = self.text.get("1.0", tk.END)
+        insert_idx = self.text.index("insert")
+        cursor_pos = len(self.text.get("1.0", insert_idx))
+        before = content[:cursor_pos]
+
+        # 查找光标前最近的 \ 或 [
+        trigger_char = None
+        trigger_pos = -1
+        for i in range(len(before) - 1, -1, -1):
+            if before[i] == "\\":
+                trigger_char = "\\"
+                trigger_pos = i
+                break
+            if before[i] == "[":
+                trigger_char = "["
+                trigger_pos = i
+                break
+
+        if trigger_char is None or trigger_pos < 0:
+            if self._autocomplete_popup:
+                self._autocomplete_popup.close()
+                self._autocomplete_popup = None
+            return
+
+        prefix = before[trigger_pos + 1 :]
+        if trigger_char == "\\" and "{" in prefix:
+            if self._autocomplete_popup:
+                self._autocomplete_popup.close()
+                self._autocomplete_popup = None
+            return
+        if trigger_char == "[" and "]" in prefix:
+            if self._autocomplete_popup:
+                self._autocomplete_popup.close()
+                self._autocomplete_popup = None
+            return
+
+        base_dir = (
+            self.workspace_root
+            if self.workspace_root and self.workspace_root.is_dir()
+            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+        )
+
+        if trigger_char == "\\":
+            suggestions = get_backslash_suggestions(prefix)
+        else:
+            suggestions = get_bracket_suggestions(prefix, content, base_dir)
+
+        if not suggestions:
+            if self._autocomplete_popup:
+                self._autocomplete_popup.close()
+                self._autocomplete_popup = None
+            return
+
+        def on_select(insert_val: str, cursor_offset: int | None = None):
+            start_idx = f"1.0+{trigger_pos}c"
+            end_idx = "insert"
+            self.text.delete(start_idx, end_idx)
+            self.text.insert(start_idx, insert_val)
+            if cursor_offset is not None and cursor_offset > 0:
+                self.text.mark_set("insert", f"{start_idx}+{len(insert_val) - cursor_offset}c")
+            if self._autocomplete_popup:
+                self._autocomplete_popup.close()
+                self._autocomplete_popup = None
+
+        if self._autocomplete_popup:
+            self._autocomplete_popup.update_suggestions(suggestions)
+            self._autocomplete_popup.prefix = prefix
+            self._autocomplete_popup.on_select = on_select
+        else:
+            self._autocomplete_popup = AutocompletePopup(
+                self.root,
+                self.text,
+                suggestions,
+                trigger_pos,
+                prefix,
+                on_select,
+            )
+
+    def _on_autocomplete_nav(self, event):
+        """补全弹窗打开时，Up/Down 选择候选"""
+        if self._autocomplete_popup:
+            if event.keysym == "Up":
+                self._autocomplete_popup._on_up()
+            else:
+                self._autocomplete_popup._on_down()
+            return "break"
+
+    def _on_autocomplete_return(self, event):
+        """补全弹窗打开时，回车插入选中项"""
+        if self._autocomplete_popup:
+            self._autocomplete_popup._on_enter()
+            return "break"
+
+    def _on_autocomplete_escape(self, event):
+        """补全弹窗打开时，Escape 关闭"""
+        if self._autocomplete_popup:
+            self._autocomplete_popup._on_escape()
+            return "break"
+
     def _schedule_auto_save(self):
         """延迟 1.5 秒后自动保存"""
         if self._auto_save_timer:

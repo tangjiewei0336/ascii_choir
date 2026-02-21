@@ -34,7 +34,7 @@ def get_lyrics_part_indices(score: ParsedScore, section_index: int) -> list[int]
         return []
     seen: set[int] = set()
     result: list[int] = []
-    for part_idx, syllables, voice_id, _ in section_lyrics[section_index]:
+    for part_idx, syllables, voice_id, _, _ in section_lyrics[section_index]:
         if voice_id is not None and syllables and part_idx not in seen:
             seen.add(part_idx)
             result.append(part_idx)
@@ -46,7 +46,7 @@ def has_lyrics_voice(score: ParsedScore, section_index: int) -> bool:
     section_lyrics = score.section_lyrics or []
     if section_index >= len(section_lyrics):
         return False
-    for _, syllables, voice_id, _ in section_lyrics[section_index]:
+    for _, syllables, voice_id, _, _ in section_lyrics[section_index]:
         if voice_id is not None and syllables:
             return True
     return False
@@ -57,7 +57,7 @@ def has_lyrics_syllables(score: ParsedScore, section_index: int) -> bool:
     section_lyrics = score.section_lyrics or []
     if section_index >= len(section_lyrics):
         return False
-    for _, syllables, _, _ in section_lyrics[section_index]:
+    for _, syllables, _, _, _ in section_lyrics[section_index]:
         if syllables:
             return True
     return False
@@ -180,7 +180,7 @@ def _build_sing_notes(
 
     # 取第一个带 voice_id 或 syllables 的 lyrics 条目（有 override 时可用无 voice_id 的）
     entry = None
-    for part_idx, syllables, voice_id, melody_part in sec_lyrics:
+    for part_idx, syllables, voice_id, melody_part, _ in sec_lyrics:
         effective_id = voice_id_override if voice_id_override is not None else voice_id
         if effective_id is not None and syllables:
             entry = (part_idx, effective_id, melody_part)
@@ -191,7 +191,7 @@ def _build_sing_notes(
 
     # 该声部的音节队列（同一声部多个 \\lyrics 会合并）
     part_queue: list[str] = []
-    for pidx, s, _, _ in sec_lyrics:
+    for pidx, s, _, _, _ in sec_lyrics:
         if pidx == part_idx:
             part_queue.extend(s)
 
@@ -284,17 +284,17 @@ def _synthesize_section(
     sec_lyrics = section_lyrics[section_index]
 
     # 收集所有带 voice_id 的条目（有 override 时覆盖）
-    entries: list[tuple[int, int, int, list[str]]] = []  # (part_idx, voice_id, melody_part, part_queue)
+    entries: list[tuple[int, int, int, list[str], int]] = []  # (part_idx, voice_id, melody_part, part_queue, volume)
     seen_parts: set[int] = set()
-    for part_idx, syllables, voice_id, melody_part in sec_lyrics:
+    for part_idx, syllables, voice_id, melody_part, volume in sec_lyrics:
         effective_id = voice_id_override if voice_id_override is not None else voice_id
         if effective_id is not None and syllables and part_idx not in seen_parts:
             seen_parts.add(part_idx)
             part_queue: list[str] = []
-            for pidx, s, _, _ in sec_lyrics:
+            for pidx, s, _, _, _ in sec_lyrics:
                 if pidx == part_idx:
                     part_queue.extend(s)
-            entries.append((part_idx, effective_id, melody_part, part_queue))
+            entries.append((part_idx, effective_id, melody_part, part_queue, volume))
 
     if not entries:
         return None
@@ -302,7 +302,7 @@ def _synthesize_section(
     mixed: Optional[np.ndarray] = None
     max_len = 0
 
-    for part_idx, voice_id, melody_part, part_queue in entries:
+    for part_idx, voice_id, melody_part, part_queue, volume in entries:
         notes = _build_sing_notes_for_entry(
             score, section_index, part_idx, voice_id, melody_part, part_queue, max_duration_seconds
         )
@@ -310,6 +310,8 @@ def _synthesize_section(
             continue
         audio = _synthesize_one_voice(notes, voice_id, sample_rate, base_url)
         if audio is not None:
+            gain = volume / 100.0
+            audio = audio * gain
             if mixed is None:
                 mixed = np.zeros_like(audio)
             target_len = max(len(mixed), len(audio))
