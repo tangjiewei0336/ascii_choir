@@ -49,7 +49,7 @@ class Player:
         self._on_progress: Optional[Callable[..., None]] = None
 
     def set_progress_callback(self, callback: Callable[..., None]):
-        """设置进度回调 (current, total, phase)。phase 为 'generating' 或 'playing'"""
+        """设置进度回调 (current, total, phase, status=None)。phase 为 'generating' 或 'playing'，status 为可选自定义状态文本"""
         self._on_progress = callback
     
     def _load_wav(
@@ -200,8 +200,9 @@ class Player:
             return None
 
         n_seg = len(segments)
+        total_work = max(n_seg, 1)
         if self._on_progress:
-            self._on_progress(0, n_seg, "generating")
+            self._on_progress(0, total_work, "generating", "准备中...")
 
         audio_parts: list[np.ndarray] = []
         total_duration = 0.0
@@ -212,6 +213,8 @@ class Player:
             for tts in seg.tts_before:
                 if self._stop_requested:
                     break
+                if self._on_progress:
+                    self._on_progress(seg_idx, total_work, "generating", f"TTS/VOICEVOX 生成中 {seg_idx + 1}/{total_work}")
                 voice_id = getattr(tts, "voice_id", None)
                 tts_result = generate_tts_audio(tts.text, tts.lang, self.sample_rate, voice_id=voice_id)
                 if tts_result:
@@ -225,7 +228,7 @@ class Player:
             if not seg.notes:
                 seg_idx += 1
                 if self._on_progress:
-                    self._on_progress(seg_idx, n_seg, "generating")
+                    self._on_progress(seg_idx, total_work, "generating", f"段 {seg_idx}/{n_seg} 完成")
                 continue
 
             lyrics_parts = get_lyrics_part_indices(parsed, seg.section_index) if has_lyrics_voice(parsed, seg.section_index) else []
@@ -236,6 +239,9 @@ class Player:
                 while j < len(segments) and not segments[j].tts_before:
                     merge_segs.append(segments[j])
                     j += 1
+
+                if self._on_progress:
+                    self._on_progress(seg_idx, total_work, "generating", f"VOICEVOX 歌声生成中 {seg_idx + 1}-{j}/{n_seg}")
 
                 lyrics_ck = cache_key_lyrics(score_text, seg.section_index, self.sample_rate)
                 sing_result = synthesize_lyrics(
@@ -267,12 +273,14 @@ class Player:
                 total_duration += target_len / self.sample_rate
                 seg_idx = j
             else:
+                if self._on_progress:
+                    self._on_progress(seg_idx, total_work, "generating", f"伴奏生成中 {seg_idx + 1}/{total_work}")
                 seg_audio, seg_dur = self._render_notes(seg.notes)
                 audio_parts.append(seg_audio)
                 total_duration += seg_dur
                 seg_idx += 1
             if self._on_progress:
-                self._on_progress(seg_idx, n_seg, "generating")
+                self._on_progress(seg_idx, total_work, "generating", f"段 {seg_idx}/{n_seg} 完成")
 
         if not audio_parts:
             return None
@@ -324,8 +332,13 @@ class Player:
             return 0.0
 
         n_seg = len(segments)
+        total_tts = sum(len(s.tts_before) for s in segments)
+        # 以 segment 数为总量，便于显示「段 X/Y」（如 3 段 lyrics 显示 1/3、2/3、3/3）
+        total_work = max(n_seg, 1)
+
+        work_done = 0
         if self._on_progress:
-            self._on_progress(0, n_seg, "generating")
+            self._on_progress(0, total_work, "generating", "准备中...")
 
         # 先生成全部内容再播放，避免不同步。有歌词时合并相关篇章，避免唱完后再用 MIDI 重复演奏
         audio_parts: list[np.ndarray] = []
@@ -338,6 +351,8 @@ class Player:
             for tts in seg.tts_before:
                 if self._stop_requested:
                     break
+                if self._on_progress:
+                    self._on_progress(seg_idx, total_work, "generating", f"TTS/VOICEVOX 生成中 {seg_idx + 1}/{total_work}")
                 voice_id = getattr(tts, "voice_id", None)
                 tts_result = generate_tts_audio(tts.text, tts.lang, self.sample_rate, voice_id=voice_id)
                 if tts_result:
@@ -351,7 +366,7 @@ class Player:
             if not seg.notes:
                 seg_idx += 1
                 if self._on_progress:
-                    self._on_progress(seg_idx, n_seg, "generating")
+                    self._on_progress(seg_idx, total_work, "generating", f"段 {seg_idx}/{n_seg} 完成")
                 continue
 
             lyrics_parts = get_lyrics_part_indices(parsed, seg.section_index) if has_lyrics_voice(parsed, seg.section_index) else []
@@ -364,9 +379,22 @@ class Player:
                     merge_segs.append(segments[j])
                     j += 1
 
+                n_voices = len(lyrics_parts)
+                if self._on_progress:
+                    self._on_progress(seg_idx, total_work, "generating", f"VOICEVOX 歌声生成中 0/{n_voices} 声部")
+
+                def _lyrics_progress(voice_cur: int, voice_tot: int):
+                    if self._on_progress and voice_tot > 0:
+                        frac = seg_idx + (voice_cur / voice_tot) * (j - seg_idx)
+                        self._on_progress(
+                            frac, total_work, "generating",
+                            f"VOICEVOX 歌声生成中 {voice_cur}/{voice_tot} 声部"
+                        )
+
                 lyrics_ck = cache_key_lyrics(score_text, seg.section_index, self.sample_rate)
                 sing_result = synthesize_lyrics(
-                    parsed, seg.section_index, self.sample_rate, max_duration_seconds=None, cache_key=lyrics_ck
+                    parsed, seg.section_index, self.sample_rate,
+                    max_duration_seconds=None, cache_key=lyrics_ck, on_progress=_lyrics_progress
                 )
                 voice_audio = sing_result[0] if sing_result else np.array([], dtype=np.float32)
 
@@ -398,12 +426,14 @@ class Player:
                 total_duration += target_len / self.sample_rate
                 seg_idx = j
             else:
+                if self._on_progress:
+                    self._on_progress(seg_idx, total_work, "generating", f"伴奏生成中 {seg_idx + 1}/{total_work}")
                 seg_audio, seg_dur = self._render_notes(seg.notes)
                 audio_parts.append(seg_audio)
                 total_duration += seg_dur
                 seg_idx += 1
             if self._on_progress:
-                self._on_progress(seg_idx, n_seg, "generating")
+                self._on_progress(seg_idx, total_work, "generating", f"段 {seg_idx}/{n_seg} 完成")
 
         if not audio_parts:
             return 0.0

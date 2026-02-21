@@ -271,6 +271,7 @@ def _synthesize_section(
     voice_id_override: Optional[int],
     base_url: str = VOICEVOX_BASE,
     cache_key: Optional[str] = None,
+    on_progress: Optional[object] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """内部：合成单篇章歌声。支持多个人声轨，混合输出。"""
     if cache_key:
@@ -301,14 +302,20 @@ def _synthesize_section(
 
     mixed: Optional[np.ndarray] = None
     max_len = 0
+    n_entries = len(entries)
 
-    for part_idx, voice_id, melody_part, part_queue, volume in entries:
+    for idx, (part_idx, voice_id, melody_part, part_queue, volume) in enumerate(entries):
         notes = _build_sing_notes_for_entry(
             score, section_index, part_idx, voice_id, melody_part, part_queue, max_duration_seconds
         )
         if not notes:
             continue
         audio = _synthesize_one_voice(notes, voice_id, sample_rate, base_url)
+        if on_progress:
+            try:
+                on_progress(idx + 1, n_entries)
+            except Exception:
+                pass
         if audio is not None:
             gain = volume / 100.0
             audio = audio * gain
@@ -342,14 +349,17 @@ def synthesize_lyrics(
     voice_id_override: Optional[int] = None,
     base_url: str = VOICEVOX_BASE,
     cache_key: Optional[str] = None,
+    on_progress: Optional[object] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """
     合成指定篇章的歌词歌声。
     返回 (audio_float32, duration_seconds) 或 None（无 voice_id 或合成失败）
     cache_key 有值时优先从缓存加载，生成后写入缓存。
+    on_progress: (current, total) 每完成一个声部调用一次。
     """
     return _synthesize_section(
-        score, section_index, sample_rate, max_duration_seconds, voice_id_override, base_url, cache_key
+        score, section_index, sample_rate, max_duration_seconds, voice_id_override,
+        base_url, cache_key, on_progress
     )
 
 

@@ -527,12 +527,13 @@ class App:
         pw.show()
         pw.update("生成音频中...", 0)
 
-        def progress_cb(current, total, phase="generating"):
+        def progress_cb(current, total, phase="generating", status=None):
             if total > 0:
                 pct = current / total * 100
             else:
                 pct = 0
-            self.root.after(0, lambda: pw.update(f"生成中 {int(current)}/{int(total)} 段", pct))
+            s = status if status else f"生成中 {int(current)}/{int(total)} 段"
+            self.root.after(0, lambda st=s, p=pct: pw.update(st, p))
 
         def run():
             try:
@@ -2303,6 +2304,7 @@ class App:
         """后台播放单小节预览。若正在预览其他小节，先停止再播当前。"""
         if self.is_playing:
             self.player.stop()
+        self.player.set_progress_callback(None)  # 预览不显示进度条
         self.is_playing = True
         self.btn_play.config(state=tk.DISABLED)
         self.btn_play_segment.config(state=tk.DISABLED)
@@ -2820,20 +2822,21 @@ class App:
         self._progress_win = ProgressWindow(self.root, title="生成进度", status_frame=self.status_frame)
         self._progress_show_after_id = None
 
-        def progress_cb(current: float, total: float, phase: str = "playing"):
+        def progress_cb(current: float, total: float, phase: str = "playing", status: str | None = None):
             if total > 0:
                 pct = current / total * 100
             else:
                 pct = 0
             self.root.after(0, lambda: self.progress_var.set(pct))
             if phase == "generating":
-                status = f"生成中 {int(current)}/{int(total)} 段"
-                def _schedule_or_update(s=status, p=pct):
-                    self._last_gen_status = s
+                s = status if status else f"生成中 {int(current)}/{int(total)} 段"
+                def _schedule_or_update(st=s, p=pct):
+                    self._last_gen_status = st
                     self._last_gen_pct = p
                     pw = getattr(self, "_progress_win", None)
                     if pw and pw.win and pw.win.winfo_exists():
-                        pw.update(s, p)
+                        pw.update(st, p)
+                        self.root.update_idletasks()
                     elif getattr(self, "_progress_show_after_id", None) is None:
                         def _delayed_show():
                             self._progress_show_after_id = None
@@ -2841,7 +2844,8 @@ class App:
                             if pw:
                                 pw.show()
                                 pw.update(getattr(self, "_last_gen_status", ""), getattr(self, "_last_gen_pct", 0))
-                        self._progress_show_after_id = self.root.after(500, _delayed_show)
+                                self.root.update_idletasks()
+                        self._progress_show_after_id = self.root.after(0, _delayed_show)
                 self.root.after(0, _schedule_or_update)
             else:
                 def _close_progress(c=current, t=total):
@@ -2903,20 +2907,21 @@ class App:
         self._progress_win = ProgressWindow(self.root, title="生成进度", status_frame=self.status_frame)
         self._progress_show_after_id = None
 
-        def progress_cb(current: float, total: float, phase: str = "playing"):
+        def progress_cb(current: float, total: float, phase: str = "playing", status: str | None = None):
             if total > 0:
                 pct = current / total * 100
             else:
                 pct = 0
             self.root.after(0, lambda: self.progress_var.set(pct))
             if phase == "generating":
-                status = f"生成中 {int(current)}/{int(total)} 段"
-                def _schedule_or_update(s=status, p=pct):
-                    self._last_gen_status = s
+                s = status if status else f"生成中 {int(current)}/{int(total)} 段"
+                def _schedule_or_update(st=s, p=pct):
+                    self._last_gen_status = st
                     self._last_gen_pct = p
                     pw = getattr(self, "_progress_win", None)
                     if pw and pw.win and pw.win.winfo_exists():
-                        pw.update(s, p)
+                        pw.update(st, p)
+                        self.root.update_idletasks()
                     elif getattr(self, "_progress_show_after_id", None) is None:
                         def _delayed_show():
                             self._progress_show_after_id = None
@@ -2924,7 +2929,8 @@ class App:
                             if pw:
                                 pw.show()
                                 pw.update(getattr(self, "_last_gen_status", ""), getattr(self, "_last_gen_pct", 0))
-                        self._progress_show_after_id = self.root.after(500, _delayed_show)
+                                self.root.update_idletasks()
+                        self._progress_show_after_id = self.root.after(0, _delayed_show)
                 self.root.after(0, _schedule_or_update)
             else:
                 def _close_progress(c=current, t=total):
@@ -2982,7 +2988,9 @@ class App:
         self.btn_play.config(state=tk.NORMAL)
         self.btn_play_segment.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)
+        self.progress_var.set(0)
         self.status_label.config(text="预览完成")
+        self._hide_status_progress()
 
     def _on_play_finished(self):
         self.is_playing = False
