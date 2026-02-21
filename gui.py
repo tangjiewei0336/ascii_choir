@@ -33,6 +33,7 @@ from autocomplete import (
     get_bracket_suggestions,
     AutocompletePopup,
 )
+from bar_utils import get_bar_ranges_at_cursor, extract_single_bar_for_preview
 
 
 def show_error_detail(parent: tk.Tk, title: str, message: str, traceback_str: str | None = None) -> None:
@@ -219,10 +220,11 @@ HELP_ENTRIES: list[tuple[str, str, str]] = [
     ("& 多声部", "& |1 2 3 4|\n& |5 6 7 1.|", "& 开始新声部，每行一个声部。用于多声部合奏或伴奏。"),
     ("| 小节线", "|1 2 3 4|5 6 7 1.|", "| 为小节分隔符。根据拍号检查每小节时值是否正确。"),
     ("( )n n连音", "(1 2 3)3", "括号后加数字 n 表示 n 连音。如 (1 2 3)3 将两拍均分为三个音。"),
-    ("~ 连音线", "1~ 2~ 3~ 4~", "~ 表示连音线，连接相邻同音高音符，使时值延续不重复触发。"),
+    ("~ 连音线", "1~ 2~ 3~ 4~", "~ 表示连音线，连接相邻同音高音符，使时值延续不重复触发。输入 ~ 时自动重复上一音符。"),
     ("# b ^ 变音", "#1 b2 ^3", "# 升半音，b 降半音，^ 还原。作用于其后音符，如 #1 为升 do。"),
     ("[音色]", "[cello]|1 2 3 4|", "方括号内指定音色名称，如 [cello]、[guitar]。作用于其后的小节或记号范围。"),
     ("[记号](...)", "[8vb](|.3---|3---|)", "记号作用域：方括号定义记号，圆括号内为作用范围。如 [8vb] 表示低八度。"),
+    ("[gliss]", "[gliss](1 5)", "滑音：从起音滑到止音，默认 1 拍。可用 | 或 _ 改变时长。"),
     ("[dc][fine]", "[dc]|1 2|[fine]|3 4|", "反复记号：[dc] 从头反复，[fine] 结束。常用于 D.C. al Fine 结构。"),
     ("// 注释", "// 这是注释", "双斜杠开始单行注释，该行内容不会被解析。"),
     ("\\tonality", "\\tonality{0}", "设置调性。0 表示 C 大调，数字为半音偏移。如 \\tonality{2} 为 D 大调。"),
@@ -1425,6 +1427,11 @@ class App:
         self.text.bind("<Return>", self._on_autocomplete_return, add="+")
         self.text.bind("<Escape>", self._on_autocomplete_escape, add="+")
         self.text.bind("<ButtonRelease-1>", self._on_text_button_release)
+        self.text.bind("<Button-1>", self._on_text_button_press, add="+")
+        self.text.bind("<Motion>", self._on_text_motion, add="+")
+        self.text.bind("<Leave>", self._on_text_leave, add="+")
+        self.root.bind_all("<KeyPress>", self._on_command_key_press, add="+")
+        self.root.bind_all("<KeyRelease>", self._on_command_key_release, add="+")
         self.text.bind("<Button-3>", self._on_text_context_menu)
         self.text.bind("<Button-2>", self._on_text_context_menu)  # macOS 右键
         # 拖拽从 Listbox 到 Text 时，释放事件会发给 Listbox（鼠标被捕获），故用全局监听
@@ -1463,11 +1470,18 @@ class App:
         self.text.tag_configure("diag_error", background=err_bg)
         self.text.tag_configure("diag_warning", background=warn_bg)
         self.text.tag_configure("comment", foreground="#2d5a2d" if not self._dark_mode else "#5a8a5a")
+        self.text.tag_configure("bar_current", background="#c8e6c9" if not self._dark_mode else "#2d4a2d")
+        self.text.tag_configure("bar_simultaneous", background="#e8f5e9" if not self._dark_mode else "#1e3a1e")
+        self.text.tag_configure("bar_clickable", underline=True, underlinefg="#2e7d32" if not self._dark_mode else "#81c784")
         self._bar_check_enabled = True  # \no_bar_check 时可关闭
         self._highlight_timer = None
+        self._diag_timer = None  # 诊断单独防抖，避免 validate() 在每次高亮时执行
         self._auto_save_timer = None
         self._autocomplete_popup: AutocompletePopup | None = None
         self._autocomplete_timer = None
+        self._command_held = False
+        self._bar_mouse_pos: tuple[int, int] | None = None
+        self._preview_play_id = 0  # 用于区分被替换的预览，避免旧线程的 _on_play_finished 覆盖新预览状态
 
         self._update_diagnostics()
     
@@ -1957,7 +1971,7 @@ class App:
             offset += line_len
         return None
 
-    def _on_text_motion(self, event) -> None:
+    def _on_text_motion_tooltip(self, event) -> None:
         """正文悬浮：\\bpm、\\tonality、\\beat、voice_id 等提示（防抖 500ms）"""
         if self._text_tooltip_after_id:
             self.root.after_cancel(self._text_tooltip_after_id)
@@ -2194,6 +2208,120 @@ class App:
                 break
         return False
 
+    _COMMAND_KEYS = frozenset({"Meta_L", "Meta_R", "Super_L", "Super_R", "Command", "Control_L", "Control_R"})
+
+    def _on_command_key_press(self, event=None):
+        if event and getattr(event, "keysym", None) in self._COMMAND_KEYS:
+            self._command_held = True
+            # 按下 Command 时若鼠标已在文本框内，立即获取坐标（否则需等 Motion 才更新）
+            try:
+                x = self.text.winfo_pointerx() - self.text.winfo_rootx()
+                y = self.text.winfo_pointery() - self.text.winfo_rooty()
+                if 0 <= x < self.text.winfo_width() and 0 <= y < self.text.winfo_height():
+                    self._bar_mouse_pos = (x, y)
+                else:
+                    self._bar_mouse_pos = None
+            except tk.TclError:
+                self._bar_mouse_pos = None
+            self._do_highlights()
+
+    def _on_command_key_release(self, event=None):
+        if event and getattr(event, "keysym", None) in self._COMMAND_KEYS:
+            self._command_held = False
+            self._bar_mouse_pos = None
+            self.text.config(cursor="xterm")
+            self._do_highlights()
+
+    def _on_text_leave(self, event=None):
+        if self._command_held:
+            self._command_held = False
+        self._bar_mouse_pos = None
+        self.text.config(cursor="xterm")
+        self._do_highlights()
+
+    def _on_text_motion(self, event=None):
+        # Command/Ctrl：macOS 可能用 Mod4(0x80000)、Mod2(0x10)、Mod3(0x10000)；Windows/Linux 用 Control(0x4)
+        # 注意：macOS 上 Motion 事件有时不包含 modifier，故仅用 event.state 设 True，不据此设 False
+        cmd_in_event = (
+            event
+            and (
+                (event.state & 0x4)
+                | (event.state & 0x10)
+                | (event.state & 0x10000)
+                | (event.state & 0x80000)
+            )
+        ) if event else 0
+        if cmd_in_event:
+            self._command_held = True
+        # 无论 event 是否带 modifier，只要 _command_held 为 True 就更新鼠标位置（解决「先按 Command 再移入」无下划线）
+        if self._command_held and event:
+            self._bar_mouse_pos = (event.x, event.y)
+            self.text.config(cursor="hand2")
+            self._schedule_highlights()
+        else:
+            self._bar_mouse_pos = None
+            self.text.config(cursor="xterm")
+            self._schedule_highlights()  # 移除 bar_clickable 下划线
+        # 非 Command 时执行 tooltip 逻辑
+        if not self._command_held and event:
+            self._on_text_motion_tooltip(event)
+
+    def _on_text_button_press(self, event=None):
+        """Command/Ctrl+点击小节时即时预览该小节（仅当前声部）"""
+        mod = (
+            (event.state & 0x4) | (event.state & 0x10)
+            | (event.state & 0x10000) | (event.state & 0x80000)
+        ) if event else 0
+        if (not getattr(self, "_command_held", False) and not mod) or not event or event.widget != self.text:
+            return
+        try:
+            idx = self.text.index(f"@{event.x},{event.y}")
+            cursor_pos = len(self.text.get("1.0", idx))
+        except tk.TclError:
+            return
+        content = self.text.get(1.0, tk.END)
+        current_ranges, _ = get_bar_ranges_at_cursor(content, cursor_pos)
+        if not current_ranges:
+            return
+        bar_start, bar_end = current_ranges[0]
+        excerpt = extract_single_bar_for_preview(content, bar_start, bar_end)
+        if not excerpt:
+            return
+        base_dir = (
+            self.workspace_root
+            if self.workspace_root and self.workspace_root.is_dir()
+            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+        )
+        try:
+            excerpt = expand_imports(excerpt, base_dir)
+        except (FileNotFoundError, ValueError, OSError):
+            pass
+        self._preview_bar(excerpt)
+        return "break"
+
+    def _preview_bar(self, score_text: str):
+        """后台播放单小节预览。若正在预览其他小节，先停止再播当前。"""
+        if self.is_playing:
+            self.player.stop()
+        self.is_playing = True
+        self.btn_play.config(state=tk.DISABLED)
+        self.btn_play_segment.config(state=tk.DISABLED)
+        self.btn_stop.config(state=tk.NORMAL)
+        self.status_label.config(text="预览小节...")
+        self._preview_play_id += 1
+        play_id = self._preview_play_id
+
+        def run():
+            try:
+                self.player.play_score(score_text)
+            except Exception:
+                pass
+            finally:
+                self.root.after(0, lambda: self._on_preview_finished(play_id))
+
+        self.play_thread = threading.Thread(target=run, daemon=True)
+        self.play_thread.start()
+
     def _on_text_button_release(self, event=None):
         """处理输入框内点击/释放，更新状态栏；拖放由 _on_global_drop_check 处理"""
         self.text.tag_raise("sel")  # 选区显示在高亮之上
@@ -2210,6 +2338,7 @@ class App:
     def _on_cursor_move(self, event=None):
         self._update_status_bar()
         self._update_duration_buttons_state()
+        self._schedule_highlights()
 
     def _update_status_bar(self, score=None):
         """更新状态栏：行列号、总拍数、小节数"""
@@ -2222,11 +2351,6 @@ class App:
         bars_str = "—"
         if score is None:
             score = getattr(self, "_cached_score", None)
-        if score is None:
-            try:
-                score, _ = validate(self.text.get(1.0, tk.END))
-            except Exception:
-                score = None
         if score and score.parts:
             part0 = score.parts[0]
             total_beats = sum(
@@ -2304,11 +2428,76 @@ class App:
             start, end = m.span()
             self.text.tag_add("comment", f"1.0+{start}c", f"1.0+{end}c")
 
+    def _highlight_bars(self):
+        """光标在小节中时：浅色高亮当前小节，更浅色高亮所有同时演奏的小节"""
+        self.text.tag_remove("bar_current", "1.0", tk.END)
+        self.text.tag_remove("bar_simultaneous", "1.0", tk.END)
+        self.text.tag_remove("bar_clickable", "1.0", tk.END)
+        try:
+            insert_idx = self.text.index("insert")
+            cursor_pos = len(self.text.get("1.0", insert_idx))
+        except tk.TclError:
+            return
+        content = self.text.get(1.0, tk.END)
+        current_ranges, simultaneous_ranges = get_bar_ranges_at_cursor(content, cursor_pos)
+        for start, end in simultaneous_ranges:
+            if 0 <= start < end <= len(content):
+                self.text.tag_add("bar_simultaneous", f"1.0+{start}c", f"1.0+{end}c")
+        for start, end in current_ranges:
+            if 0 <= start < end <= len(content):
+                self.text.tag_add("bar_current", f"1.0+{start}c", f"1.0+{end}c")
+        for tag in ("bar_simultaneous", "bar_current"):
+            self.text.tag_raise(tag)
+        cmd_held = getattr(self, "_command_held", False)
+        mouse_pos = getattr(self, "_bar_mouse_pos", None)
+        if cmd_held and mouse_pos:
+            try:
+                idx = self.text.index(f"@{mouse_pos[0]},{mouse_pos[1]}")
+                mouse_char_pos = len(self.text.get("1.0", idx))
+                hover_current, _ = get_bar_ranges_at_cursor(content, mouse_char_pos)
+                for start, end in hover_current:
+                    if 0 <= start < end <= len(content):
+                        self.text.tag_add("bar_clickable", f"1.0+{start}c", f"1.0+{end}c")
+                self.text.tag_raise("bar_clickable")
+            except tk.TclError:
+                pass
+
+    def _schedule_highlights(self, delay_ms: int = 50):
+        """防抖高亮，避免 Motion 等高频事件导致卡顿"""
+        if self._highlight_timer:
+            self.text.after_cancel(self._highlight_timer)
+        try:
+            line_count = int(self.text.index("end-1c").split(".")[0])
+        except (tk.TclError, ValueError):
+            line_count = 0
+        d = delay_ms * 2 if line_count > 80 else delay_ms
+        self._highlight_timer = self.text.after(d, self._run_highlights)
+
+    def _run_highlights(self):
+        self._highlight_timer = None
+        self._do_highlights()
+
+    def _schedule_diagnostics(self):
+        """诊断（含 validate）单独防抖，避免复杂谱子时每次高亮都跑完整验证"""
+        if self._diag_timer:
+            self.root.after_cancel(self._diag_timer)
+        try:
+            line_count = int(self.text.index("end-1c").split(".")[0])
+        except (tk.TclError, ValueError):
+            line_count = 0
+        delay = 350 if line_count > 60 else 200
+        self._diag_timer = self.root.after(delay, self._run_diagnostics)
+
+    def _run_diagnostics(self):
+        self._diag_timer = None
+        self._update_diagnostics()
+
     def _do_highlights(self):
-        """执行括号高亮、注释高亮、诊断背景色（错误红/警告黄）、行号、断点"""
+        """执行括号高亮、注释高亮、小节高亮、行号、断点；诊断单独防抖"""
         self._highlight_brackets()
         self._highlight_comments()
-        self._update_diagnostics()
+        self._highlight_bars()
+        self._schedule_diagnostics()
         self._redraw_line_numbers()
         self._redraw_breakpoints()
         self.text.tag_raise("sel")  # 选区显示在高亮之上
@@ -2350,8 +2539,33 @@ class App:
 
     _BRACKET_PAIRS = {"(": "()", ")": "()", "[": "[]", "]": "[]", "{": "{}", "}": "{}"}
 
+    def _get_prev_note_token(self, content_before_cursor: str) -> str | None:
+        """从光标前内容提取最后一个音符 token（用于 ~ 自动重复）。不含 ~ 前缀。"""
+        before = content_before_cursor.rstrip()
+        if not before:
+            return None
+        # 从末尾向前找 token 边界（空格、|、[]() 等）
+        i = len(before) - 1
+        while i >= 0 and before[i] not in " \t\n|[]()":
+            i -= 1
+        tok = before[i + 1 :].lstrip("~")
+        if not tok or not any(c.isdigit() for c in tok):
+            return None
+        return tok
+
     def _on_key_press(self, event):
-        """选中内容时输入括号：在两侧加对称括号；双换行后输入 & 时复刻上一乐章头部"""
+        """选中内容时输入括号：在两侧加对称括号；输入 ~ 时自动重复上一音符；双换行后输入 & 时复刻上一乐章头部"""
+        if event.char == "~" and not (event.state & (0x1 | 0x4 | 0x8)):
+            content = self.text.get("1.0", tk.END)
+            insert_idx = self.text.index("insert")
+            cursor_pos = len(self.text.get("1.0", insert_idx))
+            prev = self._get_prev_note_token(content[:cursor_pos])
+            if prev:
+                # 若光标前非空格，先插入空格再插入 ~音符，避免 3~3 连成一体
+                before = content[:cursor_pos].rstrip()
+                insert_text = (" " if before and before[-1] not in " \t\n|" else "") + "~" + prev
+                self.text.insert("insert", insert_text)
+                return "break"
         if not (event.state & (0x1 | 0x4 | 0x8)):
             pair = self._BRACKET_PAIRS.get(event.char)
             if pair:
@@ -2386,9 +2600,7 @@ class App:
         return "break"
 
     def _on_key_release(self, event=None):
-        if self._highlight_timer:
-            self.text.after_cancel(self._highlight_timer)
-        self._highlight_timer = self.text.after(300, self._do_highlights)
+        self._schedule_highlights()
         self.root.after(50, self._update_status_bar)
         self._update_duration_buttons_state()
         self._schedule_auto_save()
@@ -2520,10 +2732,15 @@ class App:
             self._save_to(self.current_file_path, silent=True)
 
     def _schedule_preview(self):
-        """延迟更新预览，避免输入时频繁渲染"""
+        """延迟更新预览，避免输入时频繁渲染；大谱子延长防抖"""
         if self._preview_timer:
             self.root.after_cancel(self._preview_timer)
-        self._preview_timer = self.root.after(400, self._update_preview)
+        try:
+            line_count = int(self.text.index("end-1c").split(".")[0])
+        except (tk.TclError, ValueError):
+            line_count = 0
+        delay = 800 if line_count > 120 else (500 if line_count > 50 else 400)
+        self._preview_timer = self.root.after(delay, self._update_preview)
 
     def _update_preview(self):
         """实时渲染带歌词简谱预览"""
@@ -2756,6 +2973,16 @@ class App:
         if self._status_progress_frame and self._status_progress_frame.winfo_exists():
             self._status_progress_frame.destroy()
             self._status_progress_frame = None
+
+    def _on_preview_finished(self, play_id: int):
+        """预览结束时调用；仅当 play_id 与当前一致时更新 UI（避免被替换的旧预览覆盖状态）"""
+        if play_id != self._preview_play_id:
+            return
+        self.is_playing = False
+        self.btn_play.config(state=tk.NORMAL)
+        self.btn_play_segment.config(state=tk.NORMAL)
+        self.btn_stop.config(state=tk.DISABLED)
+        self.status_label.config(text="预览完成")
 
     def _on_play_finished(self):
         self.is_playing = False

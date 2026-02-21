@@ -80,6 +80,15 @@ class RestEvent:
 
 
 @dataclass
+class GlissEvent:
+    """滑音：从 start_midi 滑到 end_midi，时长 duration_beats"""
+    start_midi: int
+    end_midi: int
+    duration_beats: float
+    volume: float = 0.6
+
+
+@dataclass
 class BarContent:
     events: list = field(default_factory=list)
     dc: bool = False   # [dc] Da Capo：从此处跳回开头
@@ -623,6 +632,55 @@ def _parse_notation_scope(
                     if scope is None:
                         next_arpeggio = True
                 if scope is not None:
+                    if notation_lower == "gliss":
+                        # [gliss](...) 滑音：默认 1 拍、两个音符，可用 | 或 _ 改变时长
+                        sub_bars, _ = _parse_notation_scope(
+                            scope, base_duration, beats_per_bar,
+                            scope_octave, volume, deviation_explicit, harmony, tonality_offset,
+                        )
+                        if apply_underscore:
+                            _halve_bar_events(sub_bars)
+                        first_midi = last_midi = None
+                        total_dur = 0.0
+                        note_count = 0
+                        for bar in sub_bars:
+                            for ev in bar.events:
+                                if isinstance(ev, NoteEvent):
+                                    if first_midi is None:
+                                        first_midi = ev.midi
+                                    last_midi = ev.midi
+                                    total_dur += ev.duration_beats
+                                    note_count += 1
+                                elif isinstance(ev, ChordEvent):
+                                    midis = sorted(ev.midis)
+                                    if first_midi is None and midis:
+                                        first_midi = midis[0]
+                                    if midis:
+                                        last_midi = midis[-1]
+                                    total_dur += ev.duration_beats
+                                    note_count += 1
+                        # 默认 1 拍：仅当内容无 | 且恰好两个音符时；apply_underscore 已由 _halve_bar_events 处理
+                        if first_midi is not None and last_midi is not None and "|" not in scope.strip() and note_count == 2:
+                            total_dur = base_duration
+                            if apply_underscore:
+                                total_dur /= 2
+                        if first_midi is not None and last_midi is not None and total_dur > 0:
+                            gliss_ev = GlissEvent(
+                                start_midi=first_midi,
+                                end_midi=last_midi,
+                                duration_beats=total_dur,
+                                volume=volume,
+                            )
+                            if current_bar.events or bar_beats > 0:
+                                current_bar.events.append(gliss_ev)
+                                bars.append(current_bar)
+                                current_bar = BarContent()
+                                bar_beats = 0.0
+                            else:
+                                current_bar.events.append(gliss_ev)
+                                bar_beats += total_dur
+                        i += consumed
+                        continue
                     sub_arpeggio = notation_lower in ("a", "arpeggio")
                     sub_bars, _ = _parse_notation_scope(
                         scope, base_duration, beats_per_bar,
@@ -1130,11 +1188,14 @@ def _extract_tts(block: str) -> list[TTSEvent]:
 
 
 def _settings_to_duration(settings: GlobalSettings) -> tuple[float, float]:
-    """从 GlobalSettings 得到 base_duration 和 beats_per_bar"""
+    """
+    从 GlobalSettings 得到 base_duration 和 beats_per_bar。
+    使用 beat 中的单位：分母定义 1 拍（如 4/4 中四分音符=1拍），一小节=分子拍。
+    base_duration=1.0 表示 1 拍，beats_per_bar=分子。
+    """
     if settings.no_bar_check:
-        return 0.25, 4.0
-    beat_unit = 1.0 / settings.beat_denominator
-    return beat_unit, float(settings.beat_numerator)
+        return 1.0, 4.0
+    return 1.0, float(settings.beat_numerator)
 
 
 def _strip_comments(text: str) -> str:
@@ -1143,14 +1204,22 @@ def _strip_comments(text: str) -> str:
 
 
 def _extract_and_expand_defines(text: str) -> str:
+    """提取 \\define 并展开，返回展开后的文本。"""
+    expanded, _ = _extract_and_expand_defines_with_mapping(text)
+    return expanded
+
+
+def _extract_and_expand_defines_with_mapping(stripped_text: str) -> tuple[str, list[int]]:
     """
     提取 \\define{key}{value} 并将文中所有 [key] 替换为 value。
-    只有方括号中的内容在 define 中定义时才会被替换；未定义的 [xxx] 保持原样。
+    返回 (expanded_text, expanded_to_stripped)：
+    expanded_to_stripped[i] = stripped_text 中对应 expanded 位置 i 的字符索引。
+    用于将解析错误位置从展开后文本映射回原始文本。
     """
     defines: dict[str, str] = {}
-    rest = text
-
-    # 1. 提取所有 \define{key}{value}
+    rest = stripped_text
+    rest_to_stripped = list(range(len(stripped_text)))
+    # 1. 提取所有 \define{key}{value}，同时构建 rest_to_stripped
     define_pattern = re.compile(r"\\define\{([^{}]+)\}\{([^{}]*)\}\s*", re.I)
     while True:
         m = define_pattern.search(rest)
@@ -1161,21 +1230,37 @@ def _extract_and_expand_defines(text: str) -> str:
         if key:
             defines[key] = value
         rest = rest[: m.start()] + rest[m.end() :]
+        rest_to_stripped = rest_to_stripped[: m.start()] + rest_to_stripped[m.end() :]
 
     if not defines:
-        return text
+        return stripped_text, list(range(len(stripped_text)))
 
-    # 2. 替换 [key] 为 value（仅当 key 在 defines 中）
-    def replacer(m: re.Match) -> str:
-        inner = m.group(1).strip()
-        return defines.get(inner, m.group(0))
+    # 2. 替换 [key] 为 value，构建 expanded_to_rest，再转为 expanded_to_stripped
+    expanded_chars: list[str] = []
+    expanded_to_rest: list[int] = []
+    pattern = re.compile(r"\[([^\]]+)\]")
+    last_end = 0
+    for m in pattern.finditer(rest):
+        expanded_chars.append(rest[last_end : m.start()])
+        expanded_to_rest.extend(range(last_end, m.start()))
+        repl = defines.get(m.group(1).strip(), m.group(0))
+        expanded_chars.append(repl)
+        expanded_to_rest.extend([m.start()] * len(repl))
+        last_end = m.end()
+    expanded_chars.append(rest[last_end:])
+    expanded_to_rest.extend(range(last_end, len(rest)))
+    expanded = "".join(expanded_chars)
+    expanded_to_stripped = [
+        rest_to_stripped[ri] if ri < len(rest_to_stripped) else rest_to_stripped[-1]
+        for ri in expanded_to_rest
+    ]
+    return expanded, expanded_to_stripped
 
-    return re.sub(r"\[([^\]]+)\]", replacer, rest)
 
-
-def parse(text: str) -> ParsedScore:
-    text = _strip_comments(text)
-    text = _extract_and_expand_defines(text)
+def parse(text: str, expand_defines: bool = True) -> ParsedScore:
+    if expand_defines:
+        text = _strip_comments(text)
+        text = _extract_and_expand_defines(text)
     settings, rest = _parse_global(text)
     _check_brackets_raise(text)
     sections_raw = _split_sections(rest)

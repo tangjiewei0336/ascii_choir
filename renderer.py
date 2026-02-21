@@ -100,7 +100,7 @@ def _assign_lyrics_to_notes(
     for sec_idx, sec_parts in enumerate(sections):
         sec_lyrics = section_lyrics[sec_idx] if sec_idx < len(section_lyrics) else []
         sec_settings = section_settings[sec_idx] if sec_idx < len(section_settings) else score.settings
-        base_dur = 1.0 / sec_settings.beat_denominator
+        base_dur = 1.0  # 1 拍（分母定义的拍）
         base_durations.append(base_dur)
         for part_idx, s, _, _, _ in sec_lyrics:
             if part_idx not in overflow_queues:
@@ -271,7 +271,7 @@ def render_to_pil(
 
     sustain_line_width = measure("１")[0]  # 增时线每拍宽度
 
-    def _measure_item(item: DisplayItem | str, dur: Optional[float] = None, base_dur: float = 0.25) -> int:
+    def _measure_item(item: DisplayItem | str, dur: Optional[float] = None, base_dur: float = 1.0) -> int:
         if item == "|":
             return measure(_BAR_FULLWIDTH)[0]
         if isinstance(item, list):
@@ -365,7 +365,7 @@ def render_to_pil(
         return single_w
 
     def row_width(row_items: list, sec_idx: int) -> int:
-        base_dur = base_durations[sec_idx] if sec_idx < len(base_durations) else 0.25
+        base_dur = base_durations[sec_idx] if sec_idx < len(base_durations) else 1.0
         return sum(_measure_item(d, dur, base_dur) + gap for d, _, dur, _, _, _, _ in row_items)
 
     def _has_accidental(disp: DisplayItem | str) -> bool:
@@ -383,7 +383,7 @@ def render_to_pil(
         has_acc = any(_has_accidental(d) for d, _, _, _, _, _, _ in row_items if d != "|")
         base = line_height + (max(8, font_size // 2) if has_acc else 0)
         chord_h = max((_chord_height(d) for d, _, _, _, _, _, _ in row_items if isinstance(d, list) and len(d) > 1), default=0)
-        base_dur = base_durations[sec_idx] if sec_idx < len(base_durations) else 0.25
+        base_dur = base_durations[sec_idx] if sec_idx < len(base_durations) else 1.0
         max_beam = 0
         for _, _, dur, _, _, _, _ in row_items:
             if dur is not None and dur > 0:
@@ -416,7 +416,7 @@ def render_to_pil(
         line_h = row_height(row_items, sec_idx)
         has_lyric = any(ly for _, ly, _, _, _, _, _ in row_items if ly)
         content_h = line_h - (lyric_height if has_lyric else 0)
-        base_dur = base_durations[sec_idx] if sec_idx < len(base_durations) else 0.25
+        base_dur = base_durations[sec_idx] if sec_idx < len(base_durations) else 1.0
 
         # 收集音符位置与符尾层数，用于绘制符杠
         note_positions: list[tuple[int, int, int]] = []  # (x, w, beam_level)

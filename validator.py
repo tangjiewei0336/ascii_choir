@@ -5,7 +5,15 @@
 import re
 from dataclasses import dataclass
 
-from parser import parse as _parse, ParseError, ParsedScore, _strip_comments, NoteEvent, ChordEvent
+from parser import (
+    parse as _parse,
+    ParseError,
+    ParsedScore,
+    _strip_comments,
+    _extract_and_expand_defines_with_mapping,
+    NoteEvent,
+    ChordEvent,
+)
 
 
 def _build_stripped_to_raw_mapping(raw_text: str) -> list[int]:
@@ -57,7 +65,7 @@ def _check_bar_duration(text: str, score) -> list[Diagnostic]:
     bars_with_expected: list[tuple] = []
     sections = getattr(score, "sections", None) or ([score.parts] if score.parts else [])
     section_settings = getattr(score, "section_settings", None) or []
-    default_beats = score.settings.beat_numerator / score.settings.beat_denominator
+    default_beats = float(score.settings.beat_numerator)
     if score.settings.no_bar_check:
         return diags
 
@@ -67,7 +75,7 @@ def _check_bar_duration(text: str, score) -> list[Diagnostic]:
             if s.no_bar_check:
                 expected = None
             else:
-                expected = s.beat_numerator / s.beat_denominator
+                expected = float(s.beat_numerator)
         else:
             expected = default_beats
         for part in section:
@@ -378,20 +386,48 @@ def parse(text: str):
     return _parse(text)
 
 
+def _map_expanded_pos_to_raw(
+    expanded_pos: int,
+    expanded_to_stripped: list[int],
+    stripped_to_raw: list[int],
+) -> int:
+    """将展开后文本的位置映射回原始文本位置"""
+    if not stripped_to_raw:
+        return 0
+    if expanded_pos < 0:
+        return 0
+    if expanded_pos >= len(expanded_to_stripped):
+        return stripped_to_raw[-1]
+    stripped_idx = expanded_to_stripped[expanded_pos]
+    if stripped_idx >= len(stripped_to_raw):
+        return stripped_to_raw[-1]
+    return stripped_to_raw[stripped_idx]
+
+
 def validate(text: str) -> tuple[ParsedScore | None, list[Diagnostic]]:
     """
     负责解析入口：调用 parser，捕获 ParseError，收集错误与警告。
     返回 (ParsedScore | None, list[Diagnostic])。
     若解析成功，返回 (score, diagnostics)；若解析失败，返回 (None, diagnostics)。
+    错误位置会从 define 展开后的文本映射回原始文本，保证行号与跳转准确。
     """
     diags: list[Diagnostic] = []
     score = None
+    stripped = _strip_comments(text)
+    expanded, expanded_to_stripped = _extract_and_expand_defines_with_mapping(stripped)
+    stripped_to_raw = _build_stripped_to_raw_mapping(text)
     try:
-        score = _parse(text)
+        score = _parse(expanded, expand_defines=False)
     except ParseError as e:
+        start_pos = e.start_pos
+        end_pos = e.end_pos
+        if start_pos is not None and end_pos is not None:
+            start_pos = _map_expanded_pos_to_raw(start_pos, expanded_to_stripped, stripped_to_raw)
+            end_pos = _map_expanded_pos_to_raw(end_pos - 1, expanded_to_stripped, stripped_to_raw) + 1
+        line, column = _pos_to_line_col(text, start_pos) if start_pos is not None else (e.line, e.column)
         diags.append(Diagnostic(
-            e.line, e.column, e.message, "error",
-            e.start_pos, e.end_pos,
+            line, column, e.message, "error",
+            start_pos, end_pos,
         ))
         return None, diags
     except Exception as e:
@@ -403,25 +439,21 @@ def validate(text: str) -> tuple[ParsedScore | None, list[Diagnostic]]:
         return None, diags
 
     if score:
-        stripped = _strip_comments(text)
         mapping = _build_stripped_to_raw_mapping(text)
-        bar_diags = _check_bar_duration(stripped, score)
+        bar_diags = _check_bar_duration(expanded, score)
         for d in bar_diags:
-            if d.start_pos is not None and d.start_pos < len(mapping):
-                d.start_pos = mapping[d.start_pos]
-            if d.end_pos is not None:
-                if 0 < d.end_pos <= len(mapping):
-                    d.end_pos = mapping[d.end_pos - 1] + 1
-                elif d.end_pos > len(mapping):
-                    d.end_pos = len(text)
-            if d.start_pos is not None:
-                d.line, d.column = _pos_to_line_col(text, d.start_pos)
+            if d.start_pos is not None and d.end_pos is not None:
+                raw_start = _map_expanded_pos_to_raw(d.start_pos, expanded_to_stripped, stripped_to_raw)
+                raw_end = _map_expanded_pos_to_raw(d.end_pos - 1, expanded_to_stripped, stripped_to_raw) + 1
+                d.start_pos = raw_start
+                d.end_pos = raw_end
+                d.line, d.column = _pos_to_line_col(text, raw_start)
         diags.extend(bar_diags)
         conn_diags, connected = _check_voicevox_connection(text)
         diags.extend(conn_diags)
         if connected:
             diags.extend(_check_lyrics_singing_support(text, score))
-        diags.extend(_check_instrument_range(score, stripped))
+        diags.extend(_check_instrument_range(score, expanded))
     diags.extend(_check_unrecognized(text))
     diags.extend(_check_fullwidth(text))
     diags.sort(key=lambda d: (d.line, d.column))
