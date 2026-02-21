@@ -231,6 +231,7 @@ def render_to_pil(
         rows = [([(("１", 0, 0, 0), None, None, False, False, [], []), (("２", 0, 0, 0), None, None, False, False, [], []), (("３", 0, 0, 0), None, None, False, False, [], []), (("４", 0, 0, 0), None, None, False, False, [], [])], 0)]
 
     gap = 10
+    SECTION_GAP = 36  # 乐章之间的垂直间距
     beam_spacing = 4  # 符尾横线间距
     beam_line_height = 2  # 每层符尾高度
     dot_r = 2
@@ -368,6 +369,65 @@ def render_to_pil(
         base_dur = base_durations[sec_idx] if sec_idx < len(base_durations) else 1.0
         return sum(_measure_item(d, dur, base_dur) + gap for d, _, dur, _, _, _, _ in row_items)
 
+    def _bar_widths_in_row(row_items: list, sec_idx: int) -> list[int]:
+        """按小节拆分，返回每小节内容宽度（不含小节线）"""
+        base_dur = base_durations[sec_idx] if sec_idx < len(base_durations) else 1.0
+        widths: list[int] = []
+        current = 0
+        for d, _, dur, _, _, _, _ in row_items:
+            if d == "|":
+                if current > 0:
+                    widths.append(current)
+                current = 0
+            else:
+                if current > 0:
+                    current += gap
+                current += _measure_item(d, dur, base_dur)
+        if current > 0:
+            widths.append(current)
+        return widths
+
+    # 每乐章内小节号对齐：按小节取各声部最大宽度
+    section_bar_widths: dict[int, list[int]] = {}
+    for row_items, sec_idx in rows:
+        if not row_items:
+            continue
+        bw = _bar_widths_in_row(row_items, sec_idx)
+        if sec_idx not in section_bar_widths:
+            section_bar_widths[sec_idx] = [0] * len(bw)
+        for j, w in enumerate(bw):
+            if j < len(section_bar_widths[sec_idx]):
+                section_bar_widths[sec_idx][j] = max(section_bar_widths[sec_idx][j], w)
+            else:
+                section_bar_widths[sec_idx].append(w)
+
+    bar_width = measure(_BAR_FULLWIDTH)[0]
+
+    def _iter_items_with_x(row_items: list, sec_idx: int):
+        """按小节对齐后的 x 坐标迭代每个 item"""
+        base_dur = base_durations[sec_idx] if sec_idx < len(base_durations) else 1.0
+        widths = section_bar_widths.get(sec_idx, [])
+        x = pad
+        bar_start = None
+        bar_idx = 0
+        for item in row_items:
+            disp, lyric, dur, tied_to, tied_from, midis, tied_midis = item
+            if disp == "|":
+                if bar_start is not None and bar_idx < len(widths):
+                    bar_content = x - bar_start
+                    pad_amt = widths[bar_idx] - bar_content
+                    if pad_amt > 0:
+                        x += pad_amt
+                yield (x, item)
+                x += bar_width + gap
+                bar_start = x
+                if bar_start is not None:  # 非首个 | 时，结束当前小节，递增 bar_idx
+                    bar_idx += 1
+            else:
+                w = _measure_item(disp, dur, base_dur)
+                yield (x, item)
+                x += w + gap
+
     def _has_accidental(disp: DisplayItem | str) -> bool:
         """检查是否有升降号"""
         if disp == "|" or not disp:
@@ -391,8 +451,21 @@ def render_to_pil(
         beam_extra = max_beam * (beam_spacing + beam_line_height) if max_beam > 0 else 0
         return max(base, chord_h) + beam_extra + (lyric_height if has_lyric else 0)
 
-    max_w = max(row_width(r, si) for r, si in rows) if rows else 400
-    total_h = sum(row_height(r, si) for r, si in rows) + 20
+    # 小节对齐后每行宽度 = 各小节目标宽度之和 + 小节线
+    def _aligned_row_width(sec_idx: int) -> int:
+        wds = section_bar_widths.get(sec_idx, [])
+        return len(wds) * (bar_width + gap) + sum(wds) if wds else 0
+
+    max_w = max((_aligned_row_width(si) for r, si in rows if r), default=400)
+    _prev_s = None
+    _section_gaps = 0
+    for _r, _si in rows:
+        if not _r:
+            continue
+        if _prev_s is not None and _si > _prev_s:
+            _section_gaps += SECTION_GAP
+        _prev_s = _si
+    total_h = sum(row_height(r, si) for r, si in rows) + 20 + _section_gaps
 
     if layout == "horizontal":
         lyric_col_w = max(
@@ -409,31 +482,32 @@ def render_to_pil(
     lyric_col_start = max_w + 30 + pad if layout == "horizontal" else 0
 
     y = pad
+    prev_sec_idx: int | None = None
     for row_items, sec_idx in rows:
         if not row_items:
             y += 10
             continue
+        if prev_sec_idx is not None and sec_idx > prev_sec_idx:
+            y += SECTION_GAP
+        prev_sec_idx = sec_idx
         line_h = row_height(row_items, sec_idx)
         has_lyric = any(ly for _, ly, _, _, _, _, _ in row_items if ly)
         content_h = line_h - (lyric_height if has_lyric else 0)
         base_dur = base_durations[sec_idx] if sec_idx < len(base_durations) else 1.0
 
-        # 收集音符位置与符尾层数，用于绘制符杠
+        # 收集音符位置与符尾层数，用于绘制符杠（使用小节对齐后的 x）
         note_positions: list[tuple[int, int, int]] = []  # (x, w, beam_level)
-        _x = pad
-        for disp, lyric, dur, _, _, _, _ in row_items:
+        for x_pos, (disp, lyric, dur, _, _, _, _) in _iter_items_with_x(row_items, sec_idx):
             if disp != "|":
                 beam_level = _duration_to_beam_level(dur, base_dur) if dur is not None and dur > 0 else 0
-                note_positions.append((_x, _measure_item(disp, dur, base_dur), beam_level))
-            _x += (_measure_item(disp, dur, base_dur) if disp != "|" else measure(_BAR_FULLWIDTH)[0]) + gap
+                note_positions.append((x_pos, _measure_item(disp, dur, base_dur), beam_level))
 
         # 绘制音符、增时线、连音弧线、歌词
         sustain_line_thick = max(1, font_size // 12)
         tie_arc_height = max(4, font_size // 5)
         prev_tied_x = prev_tied_w = prev_disp = prev_midis = prev_ys = None
         if layout == "vertical":
-            x = pad
-            for disp, lyric, dur, tied_to, tied_from, midis, tied_midis in row_items:
+            for x, (disp, lyric, dur, tied_to, tied_from, midis, tied_midis) in _iter_items_with_x(row_items, sec_idx):
                 if disp != "|" and tied_from and prev_tied_x is not None:
                     curr_ys, _ = _get_note_positions(disp, x, y, content_h)
                     if tied_midis and prev_midis is not None and prev_ys is not None:
@@ -466,15 +540,12 @@ def render_to_pil(
                     for i in range(extra):
                         x1 = x + note_w + i * sustain_line_width
                         x2 = x + note_w + (i + 1) * sustain_line_width
-                        draw.line([(x1, sustain_y), (x2, sustain_y)], fill=(0, 0, 0), width=sustain_line_thick)
-                w = _measure_item(disp, dur, base_dur)
+                        draw.line([(x1, sustain_y), (x2, sustain_y)], fill=(0, 0, 0), width=max(1, sustain_line_thick))
                 if lyric:
                     draw.text((x, y + content_h), lyric, fill=(80, 80, 80), font=font_small)
-                x += w + gap
         else:
-            x = pad
             lyric_x = lyric_col_start
-            for disp, lyric, dur, tied_to, tied_from, midis, tied_midis in row_items:
+            for x, (disp, lyric, dur, tied_to, tied_from, midis, tied_midis) in _iter_items_with_x(row_items, sec_idx):
                 if disp != "|" and tied_from and prev_tied_x is not None:
                     curr_ys, _ = _get_note_positions(disp, x, y, content_h)
                     if tied_midis and prev_midis is not None and prev_ys is not None:
@@ -506,13 +577,11 @@ def render_to_pil(
                         x1 = x + note_w + i * sustain_line_width
                         x2 = x + note_w + (i + 1) * sustain_line_width
                         draw.line([(x1, sustain_y), (x2, sustain_y)], fill=(0, 0, 0), width=sustain_line_thick)
-                w = _measure_item(disp, dur, base_dur)
                 if disp == "|":
                     draw.text((lyric_x, y), _BAR_FULLWIDTH, fill=(100, 100, 100), font=font_small)
                 elif lyric:
                     draw.text((lyric_x, y), lyric, fill=(80, 80, 80), font=font_small)
                 lyric_x += (measure(_BAR_FULLWIDTH if disp == "|" else (lyric or ""), font_small)[0]) + gap
-                x += w + gap
 
         # 绘制符杠：按小节分组，每组内找连续符尾组并画线
         bar_groups: list[list[tuple[int, int, int]]] = []

@@ -360,16 +360,14 @@ class App:
         edit_menu.add_command(label="格式化", command=self._on_format, accelerator=fmt_accel)
         edit_menu.add_command(label="复制全部到剪贴板", command=self._on_copy_all, accelerator="Ctrl+Shift+C")
 
-        tts_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="TTS", menu=tts_menu)
-        tts_menu.add_command(label="VOICEVOX 音色选择...", command=self._on_voicevox_voices)
-
-        instrument_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="乐器", menu=instrument_menu)
-        instrument_menu.add_command(label="乐器面板...", command=self._on_instrument_panel)
+        voice_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="音色", menu=voice_menu)
+        voice_menu.add_command(label="VOICEVOX 音色选择...", command=self._on_voicevox_voices)
+        voice_menu.add_command(label="乐器面板...", command=self._on_instrument_panel)
 
         settings_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="设置", menu=settings_menu)
+        settings_menu.add_command(label="AI 设置...", command=self._on_ai_settings)
         settings_menu.add_command(label="缓存设置...", command=self._on_cache_settings)
 
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -861,6 +859,78 @@ class App:
         ttk.Button(main, text="关闭", command=dlg.destroy).pack(pady=(10, 0))
         dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 80}")
 
+    def _on_ai_settings(self):
+        """打开 AI 服务设置对话框"""
+        try:
+            from src.utils.ai_settings import (
+                AI_PROVIDERS,
+                AI_PROVIDER_LABELS,
+                get_all,
+                save_all,
+            )
+        except ImportError:
+            messagebox.showwarning("AI 设置", "无法加载 ai_settings 模块", parent=self.root)
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("AI 服务设置")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+
+        main = ttk.Frame(dlg, padding=15)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        cfg = get_all()
+
+        # AI 服务提供商
+        ttk.Label(main, text="AI 服务提供商：").pack(anchor=tk.W)
+        provider_var = tk.StringVar(value=cfg["ai_provider"])
+        provider_frame = ttk.Frame(main)
+        provider_frame.pack(fill=tk.X, pady=(5, 10))
+        for pv in AI_PROVIDERS:
+            ttk.Radiobutton(
+                provider_frame,
+                text=AI_PROVIDER_LABELS.get(pv, pv),
+                variable=provider_var,
+                value=pv,
+            ).pack(side=tk.LEFT, padx=(0, 15))
+
+        # OpenAI API Key
+        ttk.Label(main, text="OpenAI API Key：").pack(anchor=tk.W, pady=(10, 0))
+        openai_key_var = tk.StringVar(value=cfg["openai_apikey"])
+        openai_key_entry = ttk.Entry(main, textvariable=openai_key_var, width=50, show="*")
+        openai_key_entry.pack(fill=tk.X, pady=(5, 0))
+
+        # OpenAI Endpoint（自定义时使用）
+        ttk.Label(main, text="OpenAI Endpoint（可选，自定义时填写）：").pack(anchor=tk.W, pady=(10, 0))
+        openai_ep_var = tk.StringVar(value=cfg["openai_endpoint"])
+        ttk.Entry(main, textvariable=openai_ep_var, width=50).pack(fill=tk.X, pady=(5, 0))
+        ttk.Label(main, text="默认 https://api.openai.com/v1", font=("", 9), foreground="gray").pack(anchor=tk.W)
+
+        # Dashscope API Key
+        ttk.Label(main, text="通义千问 API Key（Dashscope）：").pack(anchor=tk.W, pady=(10, 0))
+        dashscope_key_var = tk.StringVar(value=cfg["dashscope_api_key"])
+        ttk.Entry(main, textvariable=dashscope_key_var, width=50, show="*").pack(fill=tk.X, pady=(5, 0))
+
+        def _on_ok():
+            save_all(
+                provider_var.get(),
+                openai_key_var.get(),
+                openai_ep_var.get(),
+                dashscope_key_var.get(),
+            )
+            messagebox.showinfo("保存", "已保存 AI 设置", parent=dlg)
+            dlg.destroy()
+
+        btn_frame = ttk.Frame(main)
+        btn_frame.pack(pady=(20, 0))
+        ttk.Button(btn_frame, text="确定", command=_on_ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=dlg.destroy).pack(side=tk.LEFT)
+
+        dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 80}")
+        dlg.grab_set()
+        dlg.focus_set()
+
     def _on_cache_settings(self):
         """打开缓存设置对话框"""
         try:
@@ -1287,6 +1357,10 @@ class App:
         
         self.progress_var = tk.DoubleVar(value=0)
         self._progress_status_var = tk.StringVar(value="")
+        self._playback_elapsed = 0.0
+        self._playback_total = 0.0
+        self._playback_progress_poll_id: str | None = None
+        self._playback_progress_ui_switched = False
 
         # 状态栏（PyCharm 风格）：左侧状态、右侧行列/拍数、右下角可嵌入进度条
         self.status_frame = ttk.Frame(main)
@@ -1371,6 +1445,7 @@ class App:
             bg="#ffffff",
             highlightthickness=0,
             height=180,
+            yscrollincrement=1,
         )
         prev_scroll_y = ttk.Scrollbar(self._preview_frame, orient=tk.VERTICAL, command=self._preview_canvas.yview)
         prev_scroll_x = ttk.Scrollbar(self._preview_frame, orient=tk.HORIZONTAL, command=self._preview_canvas.xview)
@@ -1385,12 +1460,12 @@ class App:
 
         def _preview_wheel(e):
             if sys.platform == "darwin":
-                self._preview_canvas.yview_scroll(int(-e.delta * _scroll_px), "pixels")
+                self._preview_canvas.yview_scroll(int(-e.delta * _scroll_px), "units")
             else:
-                self._preview_canvas.yview_scroll(int(-(e.delta / 120) * _scroll_px), "pixels")
+                self._preview_canvas.yview_scroll(int(-(e.delta / 120) * _scroll_px), "units")
         self._preview_canvas.bind("<MouseWheel>", _preview_wheel)
-        self._preview_canvas.bind("<Button-4>", lambda e: self._preview_canvas.yview_scroll(-_scroll_px, "pixels"))
-        self._preview_canvas.bind("<Button-5>", lambda e: self._preview_canvas.yview_scroll(_scroll_px, "pixels"))
+        self._preview_canvas.bind("<Button-4>", lambda e: self._preview_canvas.yview_scroll(-_scroll_px, "units"))
+        self._preview_canvas.bind("<Button-5>", lambda e: self._preview_canvas.yview_scroll(_scroll_px, "units"))
 
         # 默认加载工作区第一个文件（已由上方 _set_workspace 设置 current_file_path）
         if self.current_file_path and self.current_file_path.exists():
@@ -1638,15 +1713,20 @@ class App:
                     bars = [p.strip() for p in parts[1:-1]]
                 elif parts[-1].rstrip().endswith(")"):
                     suffix = ")"
-                    last_bar = parts[-1].rstrip()[:-1].rstrip().rstrip("|").rstrip()
+                    last_bar = parts[-1].rstrip()[:-1].rstrip()
+                    if last_bar.endswith("|") and not last_bar.endswith(":|"):
+                        last_bar = last_bar.rstrip("|").rstrip()
                     bars = [p.strip() for p in parts[1:-1]] + [last_bar]
                 else:
                     bars = [p.strip() for p in parts[1:] if p.strip()]
             else:
                 bars = [p.strip() for p in parts[1:] if p.strip()]
             for i in range(len(bars) - 1, -1, -1):
-                if bars[i].strip() and bars[i].rstrip().endswith("|"):
-                    bars[i] = bars[i].rstrip().rstrip("|").rstrip()
+                b = bars[i].rstrip()
+                if b and b.endswith("|"):
+                    if b.endswith(":|"):
+                        continue
+                    bars[i] = b.rstrip("|").rstrip()
                     break
             return prefix, bars, suffix
         
@@ -2829,6 +2909,7 @@ class App:
         self.btn_stop.config(state=tk.NORMAL)
         self.progress_var.set(0)
         self.status_label.config(text="播放 A-B 区间...")
+        self._playback_progress_ui_switched = False
 
         self._progress_win = ProgressWindow(self.root, title="生成进度", status_frame=self.status_frame)
         self._progress_show_after_id = None
@@ -2838,8 +2919,8 @@ class App:
                 pct = current / total * 100
             else:
                 pct = 0
-            self.root.after(0, lambda: self.progress_var.set(pct))
             if phase == "generating":
+                self.root.after(0, lambda: self.progress_var.set(pct))
                 s = status if status else f"生成中 {int(current)}/{int(total)} 段"
                 def _schedule_or_update(st=s, p=pct):
                     self._last_gen_status = st
@@ -2859,21 +2940,26 @@ class App:
                         self._progress_show_after_id = self.root.after(0, _delayed_show)
                 self.root.after(0, _schedule_or_update)
             else:
-                def _close_progress(c=current, t=total):
-                    aid = getattr(self, "_progress_show_after_id", None)
-                    if aid is not None:
-                        try:
-                            self.root.after_cancel(aid)
-                        except tk.TclError:
-                            pass
-                        self._progress_show_after_id = None
-                    pw = getattr(self, "_progress_win", None)
-                    if pw:
-                        pw.close()
-                        self._progress_win = None
-                    self._progress_status_var.set(f"播放中 {c:.1f}s / {t:.1f}s")
-                    self._ensure_status_progress()
-                self.root.after(0, _close_progress)
+                # 播放阶段：只更新共享变量，由主线程轮询更新 UI，避免每 50ms 大量 after 导致卡顿
+                self._playback_elapsed = current
+                self._playback_total = total
+                if not self._playback_progress_ui_switched:
+                    self._playback_progress_ui_switched = True
+                    def _close_progress():
+                        aid = getattr(self, "_progress_show_after_id", None)
+                        if aid is not None:
+                            try:
+                                self.root.after_cancel(aid)
+                            except tk.TclError:
+                                pass
+                            self._progress_show_after_id = None
+                        pw = getattr(self, "_progress_win", None)
+                        if pw:
+                            pw.close()
+                            self._progress_win = None
+                        self._ensure_status_progress()
+                        self._start_playback_progress_poll()
+                    self.root.after(0, _close_progress)
 
         self.player.set_progress_callback(progress_cb)
 
@@ -2914,6 +3000,7 @@ class App:
         self.btn_stop.config(state=tk.NORMAL)
         self.progress_var.set(0)
         self.status_label.config(text="播放中...")
+        self._playback_progress_ui_switched = False
 
         self._progress_win = ProgressWindow(self.root, title="生成进度", status_frame=self.status_frame)
         self._progress_show_after_id = None
@@ -2923,8 +3010,8 @@ class App:
                 pct = current / total * 100
             else:
                 pct = 0
-            self.root.after(0, lambda: self.progress_var.set(pct))
             if phase == "generating":
+                self.root.after(0, lambda: self.progress_var.set(pct))
                 s = status if status else f"生成中 {int(current)}/{int(total)} 段"
                 def _schedule_or_update(st=s, p=pct):
                     self._last_gen_status = st
@@ -2944,21 +3031,26 @@ class App:
                         self._progress_show_after_id = self.root.after(0, _delayed_show)
                 self.root.after(0, _schedule_or_update)
             else:
-                def _close_progress(c=current, t=total):
-                    aid = getattr(self, "_progress_show_after_id", None)
-                    if aid is not None:
-                        try:
-                            self.root.after_cancel(aid)
-                        except tk.TclError:
-                            pass
-                        self._progress_show_after_id = None
-                    pw = getattr(self, "_progress_win", None)
-                    if pw:
-                        pw.close()
-                        self._progress_win = None
-                    self._progress_status_var.set(f"播放中 {c:.1f}s / {t:.1f}s")
-                    self._ensure_status_progress()
-                self.root.after(0, _close_progress)
+                # 播放阶段：只更新共享变量，由主线程轮询更新 UI，避免每 50ms 大量 after 导致卡顿
+                self._playback_elapsed = current
+                self._playback_total = total
+                if not self._playback_progress_ui_switched:
+                    self._playback_progress_ui_switched = True
+                    def _close_progress():
+                        aid = getattr(self, "_progress_show_after_id", None)
+                        if aid is not None:
+                            try:
+                                self.root.after_cancel(aid)
+                            except tk.TclError:
+                                pass
+                            self._progress_show_after_id = None
+                        pw = getattr(self, "_progress_win", None)
+                        if pw:
+                            pw.close()
+                            self._progress_win = None
+                        self._ensure_status_progress()
+                        self._start_playback_progress_poll()
+                    self.root.after(0, _close_progress)
 
         self.player.set_progress_callback(progress_cb)
 
@@ -2991,6 +3083,32 @@ class App:
             self._status_progress_frame.destroy()
             self._status_progress_frame = None
 
+    def _start_playback_progress_poll(self) -> None:
+        """启动播放进度轮询（主线程定时器，避免播放线程频繁 after 导致卡顿）"""
+        self._stop_playback_progress_poll()
+
+        def _poll():
+            self._playback_progress_poll_id = None
+            if not self.is_playing:
+                return
+            e, t = self._playback_elapsed, self._playback_total
+            if t > 0:
+                self.progress_var.set(e / t * 100)
+            self._progress_status_var.set(f"播放中 {e:.1f}s / {t:.1f}s")
+            if self.is_playing:
+                self._playback_progress_poll_id = self.root.after(80, _poll)
+
+        self._playback_progress_poll_id = self.root.after(80, _poll)
+
+    def _stop_playback_progress_poll(self) -> None:
+        """停止播放进度轮询"""
+        if self._playback_progress_poll_id is not None:
+            try:
+                self.root.after_cancel(self._playback_progress_poll_id)
+            except tk.TclError:
+                pass
+            self._playback_progress_poll_id = None
+
     def _on_preview_finished(self, play_id: int):
         """预览结束时调用；仅当 play_id 与当前一致时更新 UI（避免被替换的旧预览覆盖状态）"""
         if play_id != self._preview_play_id:
@@ -3005,6 +3123,7 @@ class App:
 
     def _on_play_finished(self):
         self.is_playing = False
+        self._stop_playback_progress_poll()
         self.btn_play.config(state=tk.NORMAL)
         self.btn_play_segment.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)
