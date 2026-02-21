@@ -1381,6 +1381,17 @@ class App:
         self._preview_photo: tk.PhotoImage | None = None
         self._preview_timer = None
 
+        _scroll_px = int(30 * 0.8)  # 降低 20% 滚动速度
+
+        def _preview_wheel(e):
+            if sys.platform == "darwin":
+                self._preview_canvas.yview_scroll(int(-e.delta * _scroll_px), "pixels")
+            else:
+                self._preview_canvas.yview_scroll(int(-(e.delta / 120) * _scroll_px), "pixels")
+        self._preview_canvas.bind("<MouseWheel>", _preview_wheel)
+        self._preview_canvas.bind("<Button-4>", lambda e: self._preview_canvas.yview_scroll(-_scroll_px, "pixels"))
+        self._preview_canvas.bind("<Button-5>", lambda e: self._preview_canvas.yview_scroll(_scroll_px, "pixels"))
+
         # 默认加载工作区第一个文件（已由上方 _set_workspace 设置 current_file_path）
         if self.current_file_path and self.current_file_path.exists():
             self.text.insert(tk.END, self.current_file_path.read_text(encoding="utf-8"))
