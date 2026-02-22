@@ -142,7 +142,8 @@ def _assign_lyrics_to_notes(
                         bar_result.append((disp, None, ev.duration_beats, False, False, [ev.start_midi, ev.end_midi], []))
                     elif isinstance(ev, TrillEvent):
                         disp = _midi_to_display(ev.main_midi, tonality_offset)
-                        bar_result.append((disp, None, ev.duration_beats, False, False, [ev.main_midi, ev.upper_midi], []))
+                        alt = ev.lower_midi if ev.lower_midi is not None else ev.upper_midi
+                        bar_result.append((disp, None, ev.duration_beats, False, False, [ev.main_midi, alt], []))
                 part_result.append(bar_result)
             overflow_queues[part_idx] = part_queue
             sec_result.append(part_result)

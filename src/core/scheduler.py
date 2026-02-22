@@ -132,11 +132,12 @@ def _merge_tied_events(
             i += 1
             continue
         if isinstance(ev, TrillEvent):
-            # 颤音：主音与上方音快速交替
+            # 颤音：主音与上/下方音快速交替。lower_midi 非空时为下颤音
             n_osc = max(8, int(ev.duration_beats * 8))  # 约每秒 8 次交替 @ 1 beat
             step_beats = ev.duration_beats / n_osc
+            alt_midi = ev.lower_midi if ev.lower_midi is not None else ev.upper_midi
             for idx in range(n_osc):
-                m = ev.upper_midi if idx % 2 else ev.main_midi
+                m = alt_midi if idx % 2 else ev.main_midi
                 note_start = start_beat + idx * step_beats
                 result.append((note_start, step_beats, [m], ev.volume, False))
             i += 1

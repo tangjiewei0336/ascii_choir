@@ -90,11 +90,13 @@ class GlissEvent:
 
 @dataclass
 class TrillEvent:
-    """颤音：在 main_midi 与 upper_midi 之间快速交替，时长 duration_beats"""
+    """颤音：在 main_midi 与 upper_midi 之间快速交替，时长 duration_beats。
+    lower_midi 非空时表示下颤音，与 main_midi 交替；否则用 upper_midi（上颤音）。"""
     main_midi: int
     upper_midi: int
     duration_beats: float
     volume: float = 0.6
+    lower_midi: Optional[int] = None  # 下颤音时使用
 
 
 @dataclass
@@ -644,6 +646,24 @@ def _parse_notation_scope(
                 elif notation_lower in ("a", "arpeggio"):
                     if scope is None:
                         next_arpeggio = True
+                elif notation_lower in ("tr", "tr+", "tr-") and scope is None and rest_after.strip():
+                    # [tr] 无括号时：将后续内容直到 | 作为颤音范围
+                    scope_dep = 0
+                    scope_end = len(rest_after)
+                    for j, ch in enumerate(rest_after):
+                        if ch == "|" and scope_dep == 0 and (j == 0 or rest_after[j - 1] != ":"):
+                            scope_end = j
+                            break
+                        if ch in "([":
+                            scope_dep += 1
+                        elif ch in ")]":
+                            scope_dep -= 1
+                        scope_end = j + 1
+                    scope = rest_after[:scope_end].strip()
+                    if scope.endswith("_"):
+                        apply_underscore = True
+                        scope = scope.rstrip("_").rstrip()
+                    consumed += scope_end
                 elif notation_lower == "r" and scope is None:
                     # [r] 重复上一个音（支持连音线），后续 - 或 _ 可调整时值
                     last_ev = current_bar.events[-1] if current_bar.events else None
@@ -718,8 +738,8 @@ def _parse_notation_scope(
                             bar_beats += total_dur
                         i += consumed
                         continue
-                    if notation_lower == "tr":
-                        # [tr](...) 颤音：主音与上方音快速交替，支持 - 和 _ 调整时值
+                    if notation_lower in ("tr", "tr+", "tr-"):
+                        # [tr](...) / [tr] 后续内容：颤音。tr+ 上颤音，tr- 下颤音，tr 默认上颤音
                         sub_bars, _ = _parse_notation_scope(
                             scope, base_duration, beats_per_bar,
                             scope_octave, volume, deviation_explicit, harmony, tonality_offset,
@@ -742,15 +762,19 @@ def _parse_notation_scope(
                                     upper_midi = midis[-1]
                                     total_dur += ev.duration_beats
                         if main_midi is not None and total_dur > 0:
+                            lower_midi_val = None
+                            if notation_lower == "tr-":
+                                lower_midi_val = max(0, main_midi - 2)  # 下颤音：主音下方大二度
                             if upper_midi is None:
                                 upper_midi = main_midi
-                            if main_midi == upper_midi:
-                                upper_midi = main_midi + 2  # 默认上方大二度
+                            if main_midi == upper_midi and lower_midi_val is None:
+                                upper_midi = main_midi + 2  # 默认上颤音：主音上方大二度
                             trill_ev = TrillEvent(
                                 main_midi=main_midi,
                                 upper_midi=upper_midi,
                                 duration_beats=total_dur,
                                 volume=volume,
+                                lower_midi=lower_midi_val,
                             )
                             current_bar.events.append(trill_ev)
                             bar_beats += total_dur

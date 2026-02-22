@@ -227,7 +227,7 @@ HELP_ENTRIES: list[tuple[str, str, str]] = [
     ("[记号](...)", "[8vb](|.3---|3---|)", "记号作用域：方括号定义记号，圆括号内为作用范围。如 [8vb] 表示低八度。"),
     ("[gliss]", "[gliss](1 5)", "滑音：从起音滑到止音，默认 1 拍。可用 | 或 _ 改变时长。"),
     ("[r]", "[r]", "重复上一个音，支持连音线。可用 - 和 _ 调整时值。"),
-    ("[tr]", "[tr](1) 或 [tr](1 2)", "颤音：在指定音与上方音之间快速交替。单音时上方音为大二度。可用 - 和 _ 调整时值。"),
+    ("[tr]", "[tr](1) 或 [tr] 1 - (.5 1 2 3)_", "颤音：主音与上方音快速交替。[tr+] 上颤音、[tr-] 下颤音。可用 - 和 _ 调整时值。"),
     ("[dc][fine]", "[dc]|1 2|[fine]|3 4|", "反复记号：[dc] 从头反复，[fine] 结束。常用于 D.C. al Fine 结构。"),
     ("// 注释", "// 这是注释", "双斜杠开始单行注释，该行内容不会被解析。"),
     ("\\tonality", "\\tonality{0}", "设置调性。0 表示 C 大调，数字为半音偏移。如 \\tonality{2} 为 D 大调。"),
@@ -391,7 +391,11 @@ class App:
         edit_menu.add_command(label="粘贴", command=self._on_paste, accelerator="Ctrl+V")
         edit_menu.add_command(label="全选", command=self._on_select_all, accelerator="Ctrl+A")
         edit_menu.add_separator()
-        fmt_accel = "⌘F" if sys.platform == "darwin" else "Ctrl+F"
+        find_accel = "⌘F" if sys.platform == "darwin" else "Ctrl+F"
+        edit_menu.add_command(label="查找", command=self._on_find, accelerator=find_accel)
+        replace_accel = "⌘⌥F" if sys.platform == "darwin" else "Ctrl+H"
+        edit_menu.add_command(label="替换", command=self._on_find_replace, accelerator=replace_accel)
+        fmt_accel = "⌘⇧F" if sys.platform == "darwin" else "Ctrl+Shift+F"
         edit_menu.add_command(label="格式化", command=self._on_format, accelerator=fmt_accel)
         edit_menu.add_command(label="复制全部到剪贴板", command=self._on_copy_all, accelerator="Ctrl+Shift+C")
 
@@ -602,7 +606,125 @@ class App:
     def _on_format(self):
         """格式化：对齐小节号"""
         self._on_align()
-    
+
+    def _on_find(self):
+        """查找：打开查找对话框"""
+        self._show_find_replace_dialog(focus_replace=False)
+
+    def _on_find_replace(self):
+        """替换：打开查找替换对话框"""
+        self._show_find_replace_dialog(focus_replace=True)
+
+    def _show_find_replace_dialog(self, focus_replace: bool = False):
+        """显示查找/替换对话框（类似 VSCode）"""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("查找")
+        dlg.transient(self.root)
+        dlg.resizable(True, False)
+        main_f = ttk.Frame(dlg, padding=10)
+        main_f.pack(fill=tk.X)
+        ttk.Label(main_f, text="查找:").grid(row=0, column=0, sticky=tk.W, pady=(0, 2))
+        find_var = tk.StringVar()
+        try:
+            sel = self.text.get(tk.SEL_FIRST, tk.SEL_LAST)
+            if sel and "\n" not in sel:
+                find_var.set(sel)
+        except tk.TclError:
+            pass
+        find_entry = ttk.Entry(main_f, textvariable=find_var, width=36)
+        find_entry.grid(row=0, column=1, sticky=tk.EW, padx=(8, 0), pady=(0, 2))
+        ttk.Label(main_f, text="替换为:").grid(row=1, column=0, sticky=tk.W, pady=(0, 2))
+        replace_var = tk.StringVar()
+        replace_entry = ttk.Entry(main_f, textvariable=replace_var, width=36)
+        replace_entry.grid(row=1, column=1, sticky=tk.EW, padx=(8, 0), pady=(0, 2))
+        main_f.columnconfigure(1, weight=1)
+        case_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(main_f, text="区分大小写", variable=case_var).grid(row=2, column=1, sticky=tk.W, pady=(8, 0))
+        btn_f = ttk.Frame(main_f)
+        btn_f.grid(row=3, column=0, columnspan=2, pady=(12, 0))
+
+        def _do_find(backward: bool = False) -> bool:
+            needle = find_var.get()
+            if not needle:
+                return False
+            nocase = 0 if case_var.get() else 1
+            start = self.text.index(tk.INSERT)
+            if backward:
+                pos = self.text.search(needle, "1.0", start, backwards=True, nocase=nocase)
+            else:
+                pos = self.text.search(needle, start, tk.END, nocase=nocase)
+                if not pos and start != "1.0":
+                    pos = self.text.search(needle, "1.0", tk.END, nocase=nocase)
+            if pos:
+                end_idx = f"{pos}+{len(needle)}c"
+                self.text.tag_remove(tk.SEL, "1.0", tk.END)
+                self.text.tag_add(tk.SEL, pos, end_idx)
+                self.text.mark_set(tk.INSERT, end_idx)
+                self.text.see(pos)
+                self.text.focus_set()
+                return True
+            return False
+
+        def _on_find_next():
+            if not _do_find(backward=False):
+                self.status_label.config(text="未找到")
+
+        def _on_find_prev():
+            if not _do_find(backward=True):
+                self.status_label.config(text="未找到")
+
+        def _on_replace():
+            needle = find_var.get()
+            if not needle:
+                return
+            try:
+                sel = self.text.get(tk.SEL_FIRST, tk.SEL_LAST)
+                if sel == needle or (not case_var.get() and sel.lower() == needle.lower()):
+                    self.text.delete(tk.SEL_FIRST, tk.SEL_LAST)
+                    self.text.insert(tk.INSERT, replace_var.get())
+                    self._undo_separator()
+                    self._schedule_auto_save()
+                    self._schedule_preview()
+            except tk.TclError:
+                pass
+            _on_find_next()
+
+        def _on_replace_all():
+            needle = find_var.get()
+            repl = replace_var.get()
+            if not needle:
+                return
+            content = self.text.get(1.0, tk.END)
+            if case_var.get():
+                count = content.count(needle)
+                new_content = content.replace(needle, repl)
+            else:
+                import re
+                pattern = re.escape(needle)
+                matches = re.findall(pattern, content, re.IGNORECASE)
+                count = len(matches)
+                new_content = re.sub(pattern, lambda m: repl, content, flags=re.IGNORECASE)
+            self.text.delete(1.0, tk.END)
+            self.text.insert(tk.END, new_content)
+            self._undo_separator()
+            self._schedule_auto_save()
+            self._schedule_preview()
+            self.status_label.config(text=f"已替换 {count} 处")
+            self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+            dlg.destroy()
+
+        ttk.Button(btn_f, text="查找下一个", command=_on_find_next).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_f, text="查找上一个", command=_on_find_prev).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_f, text="替换", command=_on_replace).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_f, text="全部替换", command=_on_replace_all).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_f, text="关闭", command=dlg.destroy).pack(side=tk.LEFT)
+        dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 120}")
+        find_entry.focus_set()
+        if focus_replace:
+            replace_entry.focus_set()
+        dlg.bind("<Return>", lambda e: _on_find_next())
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+
     def _on_cut(self):
         """剪切选中内容到剪贴板"""
         try:
@@ -1405,7 +1527,7 @@ class App:
         self.auto_wrap_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             toolbar,
-            text="行超宽时 " + ("⌘F" if sys.platform == "darwin" else "Ctrl+F") + " 自动换新篇章",
+            text="行超宽时 " + ("⌘⇧F" if sys.platform == "darwin" else "Ctrl+Shift+F") + " 自动换新篇章",
             variable=self.auto_wrap_var,
         ).pack(side=tk.LEFT, padx=(15, 0))
         
@@ -1455,7 +1577,7 @@ class App:
             bg=line_num_bg,
         )
         self._line_numbers.pack(side=tk.LEFT, fill=tk.Y)
-        # 等宽字体 + 不换行，便于 ⌘F/Ctrl+F 小节对齐
+        # 等宽字体 + 不换行，便于 ⌘⇧F/Ctrl+Shift+F 格式化小节对齐
         self.text = scrolledtext.ScrolledText(
             editor_frame,
             wrap=tk.NONE,
@@ -1532,12 +1654,23 @@ class App:
             else:
                 self.text.insert(tk.END, SAMPLE_SCORE)
         self.text.edit_reset()
-        def _align_handler(e):
-            self._on_align()
+        def _find_handler(e):
+            self._on_find()
             return "break"
-        self.text.bind("<Control-f>", _align_handler)
+        def _format_handler(e):
+            self._on_format()
+            return "break"
+        def _replace_handler(e):
+            self._on_find_replace()
+            return "break"
+        self.text.bind("<Control-f>", _find_handler)
+        self.text.bind("<Control-h>", _replace_handler)
+        self.text.bind("<Control-Shift-F>", _format_handler)
         if sys.platform == "darwin":
-            self.text.bind("<Command-f>", _align_handler)
+            self.text.bind("<Command-f>", _find_handler)
+            self.text.bind("<Command-Shift-F>", _format_handler)
+            # ⌘⌥F 替换（避免 ⌘H 与系统 Hide 冲突）
+            self.text.bind("<Command-Mod1-f>", _replace_handler)
         def _edit_bind(seq, handler):
             def _handler(e):
                 handler()
@@ -1651,7 +1784,7 @@ class App:
         self.text.edit_reset()
     
     def _on_align(self, event=None):
-        """⌘F/Ctrl+F: 对齐小节号；勾选时行超宽则自动换新篇章"""
+        """⌘⇧F/Ctrl+Shift+F: 对齐小节号；勾选时行超宽则自动换新篇章"""
         content = self.text.get(1.0, tk.END)
         lines = content.split("\n")
         # 按双换行分篇章，保留篇章间的非 & 行（如 \tonality{D}、空行等）
