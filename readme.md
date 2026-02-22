@@ -309,7 +309,7 @@ brew install ffmpeg
 - `\lyrics{...}{part_index}`：**声部索引**，指定歌词追加到第几个声部（0 起）。多声部时，0=第一行旋律，1=第二行旋律，以此类推
 - `\lyrics{...}{part_index}{voice_id}`：voice_id 为 VOICEVOX style_id（可选）。**有 voice_id 时播放会用 VOICEVOX 歌唱合成歌声**，替代 WAV 音色
 - `\lyrics{...}{part_index}{voice_id}{melody}`：**melody** 为和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
-- `\lyrics{...}{part_index}{voice_id}{melody}{volume}`：**volume** 为歌声音量 0–100，默认 60
+- `\lyrics{...}{part_index}{voice_id}{melody}{volume}`：**volume** 为歌声音量 0–150，默认 60，>100 可做提升
 - 行内歌词：`1(啊) 2(一)` 在音符后加括号（未测试！！）
 
 ```text
@@ -325,7 +325,7 @@ brew install ffmpeg
 - **part_index**：声部索引（0 起），0=第一行旋律，1=第二行旋律
 - **voice_id**：VOICEVOX 的 style_id，有则用歌唱合成；可省略
 - **melody**：和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
-- **volume**：歌声音量 0–100，默认 60
+- **volume**：歌声音量 0–150，默认 60，>100 可做提升
 
 ```text
 \tonality{0}

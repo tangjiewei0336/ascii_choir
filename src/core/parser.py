@@ -1267,7 +1267,7 @@ def _extract_lyrics(content: str) -> tuple[str, list[tuple[int, list[str], Optio
     \\lyrics{...}{part_index}{voice_id}{melody}、\\lyrics{...}{part_index}{voice_id}{melody}{volume}。
     返回 (剩余内容, [(part_index, syllables, voice_id, melody_part, volume)])。
     melody_part: 0=第一音旋律 1=第二音旋律（和声时）
-    volume: 音量 0–100，默认 60
+    volume: 音量 0–150，默认 60，>100 可做提升
     """
     result: list[tuple[int, list[str], Optional[int], int, int]] = []
     rest = content
@@ -1297,7 +1297,7 @@ def _extract_lyrics(content: str) -> tuple[str, list[tuple[int, list[str], Optio
         if volume_str is not None:
             try:
                 v = int(volume_str.strip())
-                volume = max(0, min(100, v))
+                volume = max(0, min(150, v))  # 0-150，>100 可做提升
             except ValueError:
                 pass
         syllables = [s.strip() for s in text.split("/") if s.strip()]
