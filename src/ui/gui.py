@@ -225,6 +225,8 @@ HELP_ENTRIES: list[tuple[str, str, str]] = [
     ("[音色]", "[cello]|1 2 3 4|", "方括号内指定音色名称，如 [cello]、[guitar]。作用于其后的小节或记号范围。"),
     ("[记号](...)", "[8vb](|.3---|3---|)", "记号作用域：方括号定义记号，圆括号内为作用范围。如 [8vb] 表示低八度。"),
     ("[gliss]", "[gliss](1 5)", "滑音：从起音滑到止音，默认 1 拍。可用 | 或 _ 改变时长。"),
+    ("[r]", "[r]", "重复上一个音，支持连音线。可用 - 和 _ 调整时值。"),
+    ("[tr]", "[tr](1) 或 [tr](1 2)", "颤音：在指定音与上方音之间快速交替。单音时上方音为大二度。可用 - 和 _ 调整时值。"),
     ("[dc][fine]", "[dc]|1 2|[fine]|3 4|", "反复记号：[dc] 从头反复，[fine] 结束。常用于 D.C. al Fine 结构。"),
     ("// 注释", "// 这是注释", "双斜杠开始单行注释，该行内容不会被解析。"),
     ("\\tonality", "\\tonality{0}", "设置调性。0 表示 C 大调，数字为半音偏移。如 \\tonality{2} 为 D 大调。"),
@@ -595,9 +597,9 @@ class App:
             pass  # 无选中内容
 
     def _on_paste(self):
-        """从剪贴板粘贴到光标位置"""
+        """从剪贴板粘贴到光标位置；全角｜自动替换为半角|"""
         try:
-            content = self.root.clipboard_get()
+            content = self.root.clipboard_get().replace("｜", "|")
             self.text.insert(tk.INSERT, content)
             self._undo_separator()
             self._schedule_auto_save()
@@ -1560,6 +1562,9 @@ class App:
         self.text.tag_configure("bar_current", background="#c8e6c9" if not self._dark_mode else "#2d4a2d")
         self.text.tag_configure("bar_simultaneous", background="#e8f5e9" if not self._dark_mode else "#1e3a1e")
         self.text.tag_configure("bar_clickable", underline=True, underlinefg="#2e7d32" if not self._dark_mode else "#81c784")
+        mono = _mono_font(12)
+        self._bar_line_font = tkfont.Font(self.text, family=mono[0], size=mono[1], weight="bold")
+        self.text.tag_configure("bar_line", font=self._bar_line_font)
         self._bar_check_enabled = True  # \no_bar_check 时可关闭
         self._highlight_timer = None
         self._diag_timer = None  # 诊断单独防抖，避免 validate() 在每次高亮时执行
@@ -1645,12 +1650,15 @@ class App:
 
             while i < n:
                 c = s[i]
-                # 检测 ]( 进入记号作用域
+                # 检测 ]( 进入记号作用域；嵌套 ]( 如 [gliss](.1 1) [gliss](1 .1) 需累加深度
                 if c == "]" and i + 1 < n and s[i + 1] == "(":
                     cur.append(c)
                     i += 1
-                    in_notation_scope = True
-                    notation_paren_depth = 1
+                    if in_notation_scope:
+                        notation_paren_depth += 1
+                    else:
+                        in_notation_scope = True
+                        notation_paren_depth = 1
                     cur.append("(")
                     i += 1
                     continue
@@ -1710,7 +1718,8 @@ class App:
             if len(parts) >= 2 and "](|" in s:
                 if parts[-1].strip() == ")":
                     suffix = ")"
-                    bars = [p.strip() for p in parts[1:-1]]
+                    # 过滤空部分，避免 bar5||||...|) 被解析为多个空小节导致每次格式化多出 |
+                    bars = [p.strip() for p in parts[1:-1] if p.strip()]
                 elif parts[-1].rstrip().endswith(")"):
                     suffix = ")"
                     last_bar = parts[-1].rstrip()[:-1].rstrip()
@@ -1721,6 +1730,10 @@ class App:
                     bars = [p.strip() for p in parts[1:] if p.strip()]
             else:
                 bars = [p.strip() for p in parts[1:] if p.strip()]
+            # 记号作用域 ](| 以 ) 结束时，末尾的 |空白| 会多拆出一小节，需移除
+            if "](|" in s and bars:
+                while len(bars) > 1 and bars[-1].strip() == "":
+                    bars.pop()
             for i in range(len(bars) - 1, -1, -1):
                 b = bars[i].rstrip()
                 if b and b.endswith("|"):
@@ -1734,6 +1747,9 @@ class App:
             all_data = []
             for _, line in part_lines:
                 prefix, bars, suffix = simple_split(line)
+                # 移除末尾空小节，避免格式化时 padding 产生 |空| 导致下次解析多出一小节
+                while bars and bars[-1].strip() == "":
+                    bars.pop()
                 all_data.append((prefix, bars, suffix))
             max_bars = max(len(bars) for _, bars, _ in all_data)
             if max_bars == 0:
@@ -2521,6 +2537,14 @@ class App:
             start, end = m.span()
             self.text.tag_add("comment", f"1.0+{start}c", f"1.0+{end}c")
 
+    def _highlight_bar_lines(self):
+        """小节号 | 和 ｜ 加粗显示"""
+        self.text.tag_remove("bar_line", "1.0", tk.END)
+        content = self.text.get(1.0, tk.END)
+        for i, c in enumerate(content):
+            if c in "|｜":
+                self.text.tag_add("bar_line", f"1.0+{i}c", f"1.0+{i+1}c")
+
     def _highlight_bars(self):
         """光标在小节中时：浅色高亮当前小节，更浅色高亮所有同时演奏的小节"""
         self.text.tag_remove("bar_current", "1.0", tk.END)
@@ -2586,9 +2610,10 @@ class App:
         self._update_diagnostics()
 
     def _do_highlights(self):
-        """执行括号高亮、注释高亮、小节高亮、行号、断点；诊断单独防抖"""
+        """执行括号高亮、注释高亮、小节号加粗、小节高亮、行号、断点；诊断单独防抖"""
         self._highlight_brackets()
         self._highlight_comments()
+        self._highlight_bar_lines()
         self._highlight_bars()
         self._schedule_diagnostics()
         self._redraw_line_numbers()
@@ -2657,7 +2682,14 @@ class App:
         return tok
 
     def _on_key_press(self, event):
-        """选中内容时输入括号：在两侧加对称括号；输入 ~ 时自动重复上一音符；双换行后输入 & 时复刻上一乐章头部"""
+        """选中内容时输入括号：在两侧加对称括号；输入 ~ 时自动重复上一音符；双换行后输入 & 时复刻上一乐章头部；全角｜自动替换为半角|"""
+        if event.char == "｜":
+            try:
+                self.text.delete(tk.SEL_FIRST, tk.SEL_LAST)
+            except tk.TclError:
+                pass
+            self.text.insert("insert", "|")
+            return "break"
         if event.char == "~" and not (event.state & (0x1 | 0x4 | 0x8)):
             content = self.text.get("1.0", tk.END)
             insert_idx = self.text.index("insert")

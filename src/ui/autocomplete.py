@@ -29,10 +29,10 @@ BRACKET_INSTRUMENTS = [
 BRACKET_NOTATIONS = [
     "8vb", "8va", "15va", "15vb",
     "ff", "f", "mf", "mp", "p", "pp", "ppp",
-    "dc", "fine", "a", "arpeggio", "gliss",
+    "dc", "fine", "a", "arpeggio", "gliss", "r", "tr",
     "+3", "-3", "+5", "-5",
 ]
-BRACKET_NOTATIONS_WITH_SCOPE = {"8vb", "8va", "15va", "15vb", "a", "arpeggio", "gliss"}
+BRACKET_NOTATIONS_WITH_SCOPE = {"8vb", "8va", "15va", "15vb", "a", "arpeggio", "gliss", "tr"}
 
 
 def _extract_defines_from_text(text: str) -> set[str]:

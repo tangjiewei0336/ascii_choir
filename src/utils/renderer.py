@@ -15,6 +15,8 @@ from src.core.parser import (
     NoteEvent,
     ChordEvent,
     RestEvent,
+    GlissEvent,
+    TrillEvent,
     _tonality_to_semitones,
     _PC_TO_DEGREE,
 )
@@ -135,6 +137,12 @@ def _assign_lyrics_to_notes(
                             lyric = part_queue.pop(0)
                         tied_midis = getattr(ev, "tied_from_prev_midis", [])
                         bar_result.append((parts, lyric, dur, tied_to, tied_from, ev.midis, tied_midis))
+                    elif isinstance(ev, GlissEvent):
+                        disp = _midi_to_display(ev.start_midi, tonality_offset)
+                        bar_result.append((disp, None, ev.duration_beats, False, False, [ev.start_midi, ev.end_midi], []))
+                    elif isinstance(ev, TrillEvent):
+                        disp = _midi_to_display(ev.main_midi, tonality_offset)
+                        bar_result.append((disp, None, ev.duration_beats, False, False, [ev.main_midi, ev.upper_midi], []))
                 part_result.append(bar_result)
             overflow_queues[part_idx] = part_queue
             sec_result.append(part_result)

@@ -2,7 +2,7 @@
 事件调度器：将解析结果转为时间轴上的音符事件，支持多声部同步
 """
 from dataclasses import dataclass, field
-from src.core.parser import ParsedScore, NoteEvent, ChordEvent, RestEvent, BarContent, Part, TTSEvent, GlissEvent
+from src.core.parser import ParsedScore, NoteEvent, ChordEvent, RestEvent, BarContent, Part, TTSEvent, GlissEvent, TrillEvent
 
 
 @dataclass
@@ -26,7 +26,7 @@ class ScheduledNote:
 
 
 def _merge_tied_events(
-    events_with_start: list[tuple[float, "NoteEvent | ChordEvent | RestEvent | GlissEvent"]],
+    events_with_start: list[tuple[float, "NoteEvent | ChordEvent | RestEvent | GlissEvent | TrillEvent"]],
 ) -> list[tuple[float, float, list[int], float, bool]]:
     """
     合并连音事件，返回 [(start_beat, duration, midis, volume, is_continuation), ...]。
@@ -131,6 +131,16 @@ def _merge_tied_events(
                 result.append((note_start, step_beats, [m], ev.volume, False))
             i += 1
             continue
+        if isinstance(ev, TrillEvent):
+            # 颤音：主音与上方音快速交替
+            n_osc = max(8, int(ev.duration_beats * 8))  # 约每秒 8 次交替 @ 1 beat
+            step_beats = ev.duration_beats / n_osc
+            for idx in range(n_osc):
+                m = ev.upper_midi if idx % 2 else ev.main_midi
+                note_start = start_beat + idx * step_beats
+                result.append((note_start, step_beats, [m], ev.volume, False))
+            i += 1
+            continue
         i += 1
     return result
 
@@ -148,7 +158,7 @@ def _part_events_to_scheduled(
         bar_start = bar_starts[bar_idx] if bar_idx < len(bar_starts) else 0.0
         cursor = 0.0
         for ev in bar.events:
-            if isinstance(ev, (NoteEvent, ChordEvent, RestEvent, GlissEvent)):
+            if isinstance(ev, (NoteEvent, ChordEvent, RestEvent, GlissEvent, TrillEvent)):
                 events_with_start.append((bar_start + cursor, ev))
             if isinstance(ev, NoteEvent):
                 cursor += ev.duration_beats
@@ -157,6 +167,8 @@ def _part_events_to_scheduled(
             elif isinstance(ev, RestEvent):
                 cursor += ev.duration_beats
             elif isinstance(ev, GlissEvent):
+                cursor += ev.duration_beats
+            elif isinstance(ev, TrillEvent):
                 cursor += ev.duration_beats
     merged = _merge_tied_events(events_with_start)
     return [
@@ -213,6 +225,8 @@ def _get_bar_duration(bar: BarContent, default_beats: float) -> float:
         elif isinstance(ev, RestEvent):
             total += ev.duration_beats
         elif isinstance(ev, GlissEvent):
+            total += ev.duration_beats
+        elif isinstance(ev, TrillEvent):
             total += ev.duration_beats
     return total if total > 0 else default_beats
 

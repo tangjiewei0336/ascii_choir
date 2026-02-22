@@ -89,6 +89,15 @@ class GlissEvent:
 
 
 @dataclass
+class TrillEvent:
+    """颤音：在 main_midi 与 upper_midi 之间快速交替，时长 duration_beats"""
+    main_midi: int
+    upper_midi: int
+    duration_beats: float
+    volume: float = 0.6
+
+
+@dataclass
 class BarContent:
     events: list = field(default_factory=list)
     dc: bool = False   # [dc] Da Capo：从此处跳回开头
@@ -631,6 +640,36 @@ def _parse_notation_scope(
                 elif notation_lower in ("a", "arpeggio"):
                     if scope is None:
                         next_arpeggio = True
+                elif notation_lower == "r" and scope is None:
+                    # [r] 重复上一个音（支持连音线），后续 - 或 _ 可调整时值
+                    last_ev = current_bar.events[-1] if current_bar.events else None
+                    if last_ev is None and bars:
+                        last_ev = bars[-1].events[-1] if bars[-1].events else None
+                    if last_ev is not None and isinstance(last_ev, (NoteEvent, ChordEvent)):
+                        last_ev.tied_to_next = True
+                        add_dur = base_duration
+                        if isinstance(last_ev, NoteEvent):
+                            new_ev = NoteEvent(
+                                midi=last_ev.midi,
+                                duration_beats=add_dur,
+                                volume=last_ev.volume,
+                                tied_from_prev=True,
+                                arpeggio=get_arpeggio_for_event(),
+                            )
+                        else:
+                            tied_midis = [m for m in last_ev.midis]
+                            new_ev = ChordEvent(
+                                midis=last_ev.midis,
+                                duration_beats=add_dur,
+                                volume=last_ev.volume,
+                                tied_from_prev=True,
+                                tied_from_prev_midis=tied_midis,
+                                arpeggio=get_arpeggio_for_event(),
+                            )
+                        current_bar.events.append(new_ev)
+                        bar_beats += add_dur
+                    i += consumed
+                    continue
                 if scope is not None:
                     if notation_lower == "gliss":
                         # [gliss](...) 滑音：默认 1 拍、两个音符，可用 | 或 _ 改变时长
@@ -671,14 +710,46 @@ def _parse_notation_scope(
                                 duration_beats=total_dur,
                                 volume=volume,
                             )
-                            if current_bar.events or bar_beats > 0:
-                                current_bar.events.append(gliss_ev)
-                                bars.append(current_bar)
-                                current_bar = BarContent()
-                                bar_beats = 0.0
-                            else:
-                                current_bar.events.append(gliss_ev)
-                                bar_beats += total_dur
+                            current_bar.events.append(gliss_ev)
+                            bar_beats += total_dur
+                        i += consumed
+                        continue
+                    if notation_lower == "tr":
+                        # [tr](...) 颤音：主音与上方音快速交替，支持 - 和 _ 调整时值
+                        sub_bars, _ = _parse_notation_scope(
+                            scope, base_duration, beats_per_bar,
+                            scope_octave, volume, deviation_explicit, harmony, tonality_offset,
+                        )
+                        if apply_underscore:
+                            _halve_bar_events(sub_bars)
+                        main_midi = upper_midi = None
+                        total_dur = 0.0
+                        for bar in sub_bars:
+                            for ev in bar.events:
+                                if isinstance(ev, NoteEvent):
+                                    if main_midi is None:
+                                        main_midi = ev.midi
+                                    upper_midi = ev.midi
+                                    total_dur += ev.duration_beats
+                                elif isinstance(ev, ChordEvent) and ev.midis:
+                                    midis = sorted(ev.midis)
+                                    if main_midi is None:
+                                        main_midi = midis[0]
+                                    upper_midi = midis[-1]
+                                    total_dur += ev.duration_beats
+                        if main_midi is not None and total_dur > 0:
+                            if upper_midi is None:
+                                upper_midi = main_midi
+                            if main_midi == upper_midi:
+                                upper_midi = main_midi + 2  # 默认上方大二度
+                            trill_ev = TrillEvent(
+                                main_midi=main_midi,
+                                upper_midi=upper_midi,
+                                duration_beats=total_dur,
+                                volume=volume,
+                            )
+                            current_bar.events.append(trill_ev)
+                            bar_beats += total_dur
                         i += consumed
                         continue
                     sub_arpeggio = notation_lower in ("a", "arpeggio")
@@ -769,7 +840,28 @@ def _parse_notation_scope(
                     continue
                 tied_from_prev = t.startswith("~")
                 t_clean = t.lstrip("~")  # 连音线 ~ 不影响时值，只做渲染
-                if "/" in t:
+                if t_clean.lower() == "[r]":
+                    # [r] 重复上一个音，括号内也支持；~[r] 表示连音，无 ~ 则重新触发
+                    # 优先从同组 notes_in_tuplet 取上一音（如 (b6/1. [r][r] 中 [r] 应重复 b6/1.）
+                    last_midis: list[int] | None = None
+                    if notes_in_tuplet:
+                        last_kind, last_m, _, _ = notes_in_tuplet[-1]
+                        if last_kind in ("note", "chord") and last_m:
+                            last_midis = last_m
+                    if last_midis is None:
+                        last_ev = current_bar.events[-1] if current_bar.events else None
+                        if last_ev is None and bars:
+                            last_ev = bars[-1].events[-1] if bars[-1].events else None
+                        if last_ev is not None and isinstance(last_ev, (NoteEvent, ChordEvent)):
+                            last_midis = [last_ev.midi] if isinstance(last_ev, NoteEvent) else list(last_ev.midis)
+                    if last_midis:
+                        if len(last_midis) == 1:
+                            notes_in_tuplet.append(("note", last_midis, base_duration, tied_from_prev))
+                        else:
+                            notes_in_tuplet.append(("chord", last_midis, base_duration, tied_from_prev))
+                    continue
+                if "/" in t or "／" in t:
+                    t = t.replace("／", "/")
                     parts = t.split("/")
                     chord = []
                     for p in parts:
@@ -880,7 +972,8 @@ def _parse_notation_scope(
                 if prev_bar.events:
                     last_ev = prev_bar.events[-1]
             add_dur = base_duration
-            if "/" in tok:
+            if "/" in tok or "／" in tok:
+                tok = tok.replace("／", "/")
                 parts = tok.split("/")
                 chord = []
                 max_dur = base_duration
@@ -948,8 +1041,9 @@ def _parse_notation_scope(
                     tie_target_ev = None
                     tie_target_bar = None
             continue
-        # 和弦 1/3/5（每个音可单独带升降号）；末尾 _ 表示四分除以2=八分
-        if "/" in tok:
+        # 和弦 1/3/5（每个音可单独带升降号）；末尾 _ 表示四分除以2=八分；支持全角／
+        if "/" in tok or "／" in tok:
+            tok = tok.replace("／", "/")
             parts = tok.split("/")
             acc_tok = _any_accidental_in_tokens(parts) if harmony != 0 else None
             if acc_tok:

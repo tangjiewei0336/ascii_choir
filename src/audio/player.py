@@ -106,12 +106,14 @@ class Player:
                     continue
                 # 找到：合并延续
                 merged = True
+                inst = getattr(prev, "instrument", "grand_piano")
                 if len(prev.midis) == 1:
                     # 单音：直接延长
                     result[i] = ScheduledNote(
                         prev.start_time, prev.duration + n.duration,
                         prev.midis, prev.volume, prev.part_index,
                         is_continuation=False,
+                        instrument=inst,
                     )
                 else:
                     # 和弦：拆出被 tie 的音单独延长，其余保持
@@ -121,10 +123,12 @@ class Player:
                         result.append(ScheduledNote(
                             prev.start_time, prev.duration, others,
                             prev.volume, prev.part_index, is_continuation=False,
+                            instrument=inst,
                         ))
                     result.append(ScheduledNote(
                         prev.start_time, prev.duration + n.duration, [midi],
                         prev.volume, prev.part_index, is_continuation=False,
+                        instrument=inst,
                     ))
                     # 和弦拆开后需按 start_time 排序
                     result.sort(key=lambda x: (x.start_time, -len(x.midis)))
@@ -258,7 +262,8 @@ class Player:
                         acc, acc_dur = self._render_notes(other_notes)
                         if len(acc) > 0:
                             accomp_parts.append((acc, t_offset))
-                    t_offset += max(n.start_time + n.duration for n in mseg.notes)
+                    if mseg.notes:
+                        t_offset += max(n.start_time + n.duration for n in mseg.notes)
 
                 target_len = max(len(voice_audio), int(t_offset * self.sample_rate) + 1)
                 mix = np.zeros(target_len, dtype=np.float32)
@@ -408,7 +413,8 @@ class Player:
                         acc, acc_dur = self._render_notes(other_notes)
                         if len(acc) > 0:
                             accomp_parts.append((acc, t_offset))
-                    t_offset += max(n.start_time + n.duration for n in mseg.notes)
+                    if mseg.notes:
+                        t_offset += max(n.start_time + n.duration for n in mseg.notes)
 
                 target_len = max(
                     len(voice_audio),
