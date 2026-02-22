@@ -53,6 +53,13 @@ def _request(method: str, url: str, data: Optional[bytes] = None, headers: Optio
     if data and "Content-Type" not in (headers or {}):
         req.add_header("Content-Type", "application/json")
     try:
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.hostname or "").lower()
+        use_no_proxy = host in {"127.0.0.1", "localhost", "::1"}
+        if use_no_proxy:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=10) as resp:
+                return resp.status, resp.read()
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
@@ -66,7 +73,12 @@ def _format_error(status: int, body: bytes, endpoint: str) -> str:
     body_str = body.decode("utf-8", errors="replace").strip() or "(无响应体)"
     msg = f"VOICEVOX {endpoint} 返回 {status}: {body_str}"
     if status == 502:
-        msg += "\n\n502 常见原因：引擎未启动、已崩溃或代理异常。请确认 voicevox_engine 已运行，可访问 http://127.0.0.1:50021/docs 测试。"
+        msg += (
+            "\n\n502 常见原因：引擎未启动、已崩溃或代理异常。请确认 voicevox_engine 已运行，"
+            "可访问 http://127.0.0.1:50021/docs 测试。\n"
+            "若浏览器可访问但程序报 502，可能是系统代理生效，"
+            "请设置 NO_PROXY=127.0.0.1,localhost 或关闭代理后重试。"
+        )
     elif status == 500 and "sing" in endpoint.lower():
         msg += "\n\n歌唱 API 500：BPM 过快时歌手可能唱不出来，可尝试降低 \\bpm 数值。"
     elif status in (0, -1) or "Connection" in body_str:
