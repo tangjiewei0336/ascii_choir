@@ -4,7 +4,7 @@
 import numpy as np
 
 from src.audio.audio_cache import (
-    cache_key_lyrics,
+    cache_key_lyrics_from_parsed,
     cache_key_play,
     get_cached_audio,
     save_audio_to_cache,
@@ -36,6 +36,43 @@ except ImportError:
 
     def get_lyrics_part_indices(*args, **kwargs):
         return []
+
+
+def _apply_reverb(audio: np.ndarray, amount: int, sample_rate: int) -> np.ndarray:
+    """
+    全局混响：梳状滤波器反馈 + 多延迟叠加，产生可闻的空间感。
+    amount: 0-100，混响强度（wet 比例）
+    """
+    if amount <= 0 or len(audio) == 0:
+        return audio
+    # 低档位也较明显
+    wet = min(1.0, (amount / 100.0) ** 0.85)
+    dry = 1.0 - wet
+    n = len(audio)
+    # 梳状滤波器：带反馈的延迟线，产生衰减尾音
+    comb_delays = [int(0.03 * sample_rate), int(0.037 * sample_rate), int(0.041 * sample_rate), int(0.047 * sample_rate)]
+    comb_decay = 0.55
+    buf_len = n + max(comb_delays) + 512
+    buf = np.zeros(buf_len, dtype=np.float32)
+    buf[:n] = audio
+    comb_sum = np.zeros(buf_len, dtype=np.float32)
+    for d in comb_delays:
+        out = np.zeros(buf_len, dtype=np.float32)
+        for i in range(d, min(buf_len, n + d * 2)):
+            out[i] = buf[i] + comb_decay * out[i - d]
+        comb_sum += out
+    comb_sum /= len(comb_delays)
+    # 取混响尾
+    reverb_tail = comb_sum[:n].astype(np.float32)
+    # 归一化混响电平，避免过载，保留足够响度
+    rms = np.sqrt(np.mean(reverb_tail ** 2) + 1e-12)
+    if rms > 0.8:
+        reverb_tail = reverb_tail * (0.8 / rms)
+    result = dry * audio + wet * reverb_tail
+    peak = np.abs(result).max()
+    if peak > 1.0:
+        result = result / peak * 0.95
+    return result.astype(np.float32)
 
 
 class Player:
@@ -259,7 +296,7 @@ class Player:
                 if self._on_progress:
                     self._on_progress(seg_idx, total_work, "generating", f"VOICEVOX 歌声生成中 {seg_idx + 1}-{j}/{n_seg}")
 
-                lyrics_ck = cache_key_lyrics(score_text, seg.section_index, self.sample_rate)
+                lyrics_ck = cache_key_lyrics_from_parsed(parsed, seg.section_index, self.sample_rate)
                 sing_result = synthesize_lyrics(
                     parsed, seg.section_index, self.sample_rate, max_duration_seconds=None, cache_key=lyrics_ck
                 )
@@ -309,6 +346,12 @@ class Player:
         max_val = np.abs(audio).max()
         if max_val > 1.0:
             audio = audio / max_val * 0.95
+
+        # 全局混响
+        section_settings = getattr(parsed, "section_settings", None)
+        reverb = section_settings[-1].reverb if section_settings else getattr(parsed.settings, "reverb", 0)
+        if reverb > 0:
+            audio = _apply_reverb(audio, reverb, self.sample_rate)
 
         total_duration = len(audio) / self.sample_rate
         save_audio_to_cache(ck, audio, total_duration)
@@ -408,7 +451,7 @@ class Player:
                             f"VOICEVOX 歌声生成中 {voice_cur}/{voice_tot} 声部"
                         )
 
-                lyrics_ck = cache_key_lyrics(score_text, seg.section_index, self.sample_rate)
+                lyrics_ck = cache_key_lyrics_from_parsed(parsed, seg.section_index, self.sample_rate)
                 sing_result = synthesize_lyrics(
                     parsed, seg.section_index, self.sample_rate,
                     max_duration_seconds=None, cache_key=lyrics_ck, on_progress=_lyrics_progress

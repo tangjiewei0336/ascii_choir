@@ -14,6 +14,7 @@ BACKSLASH_COMMANDS = [
     ("tonality", "\\tonality{0}", 1),
     ("beat", "\\beat{4/4}", 1),
     ("bpm", "\\bpm{120}", 1),
+    ("reverb", "\\reverb{30}", 1),
     ("no_bar_check", "\\no_bar_check", None),
     ("import", "\\import{文件名}", 1),
     ("define", "\\define{名称}{内容}", 1),

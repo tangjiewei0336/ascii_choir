@@ -9,7 +9,7 @@ from typing import Optional
 import numpy as np
 import soundfile as sf
 
-from src.audio.audio_cache import cache_key_lyrics, get_cached_audio, save_audio_to_cache
+from src.audio.audio_cache import cache_key_lyrics_from_parsed, get_cached_audio, save_audio_to_cache
 from src.core.parser import ParsedScore, NoteEvent, ChordEvent, RestEvent, BarContent
 from src.core.scheduler import _align_parts, _get_bar_duration
 from src.voice.voicevox_client import (
@@ -404,7 +404,7 @@ def synthesize_acappella(
             )
             if can_sing:
                 # 不截断，生成完整歌词内容
-                lyrics_ck = cache_key_lyrics(score_text, seg.section_index, sample_rate)
+                lyrics_ck = cache_key_lyrics_from_parsed(parsed, seg.section_index, sample_rate)
                 sing_result = _synthesize_section(
                     parsed, seg.section_index, sample_rate,
                     max_duration_seconds=None,

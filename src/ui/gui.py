@@ -1549,7 +1549,7 @@ class App:
         self._status_progress_frame: ttk.Frame | None = None  # 播放阶段嵌入的进度条
         
         # 编辑区（左侧行号 + 正文）
-        ttk.Label(main, text="简谱输入（支持 \\tonality、\\beat、\\bpm、\\no_bar_check）:").pack(anchor=tk.W)
+        ttk.Label(main, text="简谱输入（支持 \\tonality、\\beat、\\bpm、\\reverb、\\no_bar_check）:").pack(anchor=tk.W)
         colors = self._theme_colors()
         editor_frame = ttk.Frame(main)
         editor_frame.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -3112,7 +3112,7 @@ class App:
         content = self.text.get(1.0, tk.END)
         lines = content.split("\n")
         # 收集 A 断点之前的 tonality、beat、bpm、no_bar_check 等全局设置
-        setting_pat = re.compile(r"\\tonality\{|\\beat\{|\\bpm\{|\\no_bar_check", re.I)
+        setting_pat = re.compile(r"\\tonality\{|\\beat\{|\\bpm\{|\\reverb\{|\\no_bar_check", re.I)
         header_lines = [
             ln for ln in lines[: start_line - 1]
             if setting_pat.search(ln)

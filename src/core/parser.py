@@ -49,6 +49,7 @@ class GlobalSettings:
     beat_denominator: int = 4
     bpm: int = 120
     no_bar_check: bool = False
+    reverb: int = 0  # 0-100，全局混响强度
 
 
 @dataclass
@@ -164,6 +165,7 @@ def _copy_settings(s: GlobalSettings) -> GlobalSettings:
         beat_denominator=s.beat_denominator,
         bpm=s.bpm,
         no_bar_check=s.no_bar_check,
+        reverb=s.reverb,
     )
 
 
@@ -205,6 +207,15 @@ def _parse_global(text: str, inherit: GlobalSettings | None = None) -> tuple[Glo
         m = re.match(r"\\no_bar_check\s*", rest, re.I)
         if m:
             settings.no_bar_check = True
+            rest = rest[m.end():]
+            continue
+        m = re.match(r"\\reverb\{(\d+)\}\s*", rest, re.I)
+        if m:
+            try:
+                v = int(m.group(1))
+                settings.reverb = max(0, min(100, v))
+            except ValueError:
+                pass
             rest = rest[m.end():]
             continue
         break

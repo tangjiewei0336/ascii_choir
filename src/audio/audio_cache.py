@@ -6,9 +6,12 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from src.core.parser import ParsedScore
 
 _DEFAULT_LIMIT_MB = 500
 _SETTINGS_FILENAME = "cache_settings.json"
@@ -178,6 +181,74 @@ def cache_key_tts(text: str, lang: str, voice_id: Optional[int], sample_rate: in
     return _make_hash("tts", text, lang, voice_id, sample_rate)
 
 
+def _lyrics_fingerprint(score: "ParsedScore", section_index: int) -> list:
+    """
+    提取仅与人声轨相关的指纹，伴奏、其他声部、全局混响等变动不影响缓存。
+    返回可序列化的结构，用于 cache_key_lyrics_from_parsed。
+    """
+    from src.core.parser import (
+        ParsedScore,
+        NoteEvent,
+        ChordEvent,
+        RestEvent,
+        GlissEvent,
+        TrillEvent,
+    )
+
+    sections = getattr(score, "sections", None) or []
+    section_lyrics = getattr(score, "section_lyrics", None) or []
+    section_settings = getattr(score, "section_settings", None) or []
+
+    if section_index >= len(section_lyrics) or section_index >= len(sections):
+        return []
+
+    lyrics_part_indices: set[int] = set()
+    all_sec_lyrics: list = []
+    for si in range(section_index, len(section_lyrics)):
+        sl = section_lyrics[si]
+        all_sec_lyrics.append([(p, tuple(s), vid, mp, vol) for p, s, vid, mp, vol in sl])
+        for p, s, vid, _, _ in sl:
+            if vid is not None and s:
+                lyrics_part_indices.add(p)
+    if not lyrics_part_indices:
+        return []
+
+    fp: list = [("lyrics", all_sec_lyrics)]
+
+    for sec_idx in range(section_index, len(sections)):
+        section = sections[sec_idx]
+        s = section_settings[sec_idx] if sec_idx < len(section_settings) else score.settings
+        fp.append(("settings", (s.tonality, s.beat_numerator, s.beat_denominator, s.bpm, s.no_bar_check)))
+        for part_idx in sorted(lyrics_part_indices):
+            if part_idx >= len(section):
+                continue
+            part_bars = section[part_idx].bars
+            bar_events: list = []
+            for bar in part_bars:
+                evs: list = []
+                for ev in bar.events:
+                    if isinstance(ev, NoteEvent):
+                        evs.append(("N", ev.midi, ev.duration_beats, ev.lyric or ""))
+                    elif isinstance(ev, ChordEvent):
+                        evs.append(("C", tuple(ev.midis), ev.duration_beats, ev.lyric or ""))
+                    elif isinstance(ev, RestEvent):
+                        evs.append(("R", ev.duration_beats))
+                    elif isinstance(ev, GlissEvent):
+                        evs.append(("G", ev.start_midi, ev.end_midi, ev.duration_beats))
+                    elif isinstance(ev, TrillEvent):
+                        evs.append(("T", ev.main_midi, ev.duration_beats))
+                bar_events.append(tuple(evs))
+            fp.append(("part", part_idx, tuple(bar_events)))
+
+    return fp
+
+
 def cache_key_lyrics(score_text: str, section_index: int, sample_rate: int) -> str:
-    """歌词歌声合成的缓存键"""
+    """歌词歌声合成的缓存键（基于全文，兼容旧逻辑）"""
     return _make_hash("lyrics", score_text, section_index, sample_rate)
+
+
+def cache_key_lyrics_from_parsed(score: "ParsedScore", section_index: int, sample_rate: int) -> str:
+    """歌词歌声合成的缓存键（仅侦测人声轨变动，伴奏等修改不失效）"""
+    fp = _lyrics_fingerprint(score, section_index)
+    return _make_hash("lyrics_v2", fp, section_index, sample_rate)
