@@ -2,6 +2,7 @@
 乐器注册表：扫描 sound_library，提供音域、可弹判断、吉他选弦等。
 """
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -28,10 +29,12 @@ def _scan_instrument_range(lib_path: Path) -> tuple[int, int]:
     return min(midis), max(midis)
 
 
+@lru_cache(maxsize=1)
 def get_all_instruments() -> dict[str, dict]:
     """
     扫描 sound_library，返回所有乐器及其音域。
     返回格式: { "乐器名": { "min_midi": int, "max_midi": int, "path": str, "is_guitar_string": bool } }
+    结果已缓存，避免重复扫描文件系统（validate/诊断等高频调用时显著提速）。
     """
     result: dict[str, dict] = {}
     if not SOUND_LIBRARY.exists():
@@ -88,6 +91,11 @@ def get_all_instruments() -> dict[str, dict]:
         }
 
     return result
+
+
+def invalidate_instruments_cache() -> None:
+    """清除乐器缓存（如 sound_library 有更新时调用）"""
+    get_all_instruments.cache_clear()
 
 
 def can_play_note(instrument: str, midi: int) -> bool:
