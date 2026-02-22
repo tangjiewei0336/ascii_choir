@@ -3,6 +3,7 @@
 """
 import re
 import sys
+import time
 import subprocess
 import tkinter as tk
 import tkinter.font as tkfont
@@ -34,6 +35,27 @@ from src.ui.autocomplete import (
     AutocompletePopup,
 )
 from src.utils.bar_utils import get_bar_ranges_at_cursor, extract_single_bar_for_preview
+
+# 性能分析：设置 PROFILE_EDITOR=1 时，将耗时 > 16ms 的调用打印到 stderr
+_PROFILE_EDITOR = os.environ.get("PROFILE_EDITOR", "").strip() in ("1", "true", "yes")
+_PROFILE_THRESHOLD_MS = 16
+
+
+def _profile(name: str):
+    """装饰器：当 PROFILE_EDITOR=1 且耗时超过阈值时打印"""
+    def decorator(fn):
+        def wrapper(*args, **kwargs):
+            if not _PROFILE_EDITOR:
+                return fn(*args, **kwargs)
+            t0 = time.perf_counter()
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                dt_ms = (time.perf_counter() - t0) * 1000
+                if dt_ms > _PROFILE_THRESHOLD_MS:
+                    print(f"[PROFILE] {name}: {dt_ms:.1f}ms", file=sys.stderr)
+        return wrapper
+    return decorator
 
 
 def show_error_detail(parent: tk.Tk, title: str, message: str, traceback_str: str | None = None) -> None:
@@ -1841,6 +1863,7 @@ class App:
         self._clamp_breakpoints_to_line_count(len(new_content.splitlines()))
         return "break"
     
+    @_profile("_highlight_brackets")
     def _highlight_brackets(self):
         """括号捕获组高亮：嵌套的 [xxx](...) 使用不同荧光色"""
         for tag in self.text.tag_names():
@@ -1884,6 +1907,7 @@ class App:
             tag_idx = min(level, len(colors) - 1)
             self.text.tag_add(f"bracket{tag_idx}", f"1.0+{start}c", f"1.0+{end}c")
     
+    @_profile("_redraw_line_numbers")
     def _redraw_line_numbers(self):
         """重绘左侧行号"""
         try:
@@ -2063,6 +2087,7 @@ class App:
             offset += line_len
         return None
 
+    @_profile("_on_text_motion_tooltip")
     def _on_text_motion_tooltip(self, event) -> None:
         """正文悬浮：\\bpm、\\tonality、\\beat、voice_id 等提示（防抖 500ms）"""
         if self._text_tooltip_after_id:
@@ -2229,6 +2254,7 @@ class App:
             return
         save_breakpoints(base, self.current_file_path.name, list(self._breakpoints))
 
+    @_profile("_redraw_breakpoints")
     def _redraw_breakpoints(self) -> None:
         """重绘断点 gutter，A 用红、B 用蓝区分"""
         try:
@@ -2331,6 +2357,7 @@ class App:
         self.text.config(cursor="xterm")
         self._do_highlights()
 
+    @_profile("_on_text_motion")
     def _on_text_motion(self, event=None):
         # Command/Ctrl：macOS 可能用 Mod4(0x80000)、Mod2(0x10)、Mod3(0x10000)；Windows/Linux 用 Control(0x4)
         # 注意：macOS 上 Motion 事件有时不包含 modifier，故仅用 event.state 设 True，不据此设 False
@@ -2513,6 +2540,7 @@ class App:
                 self.text.mark_set(tk.INSERT, f"{d.line}.{d.column}")
             self.text.focus_set()
 
+    @_profile("_highlight_comments")
     def _highlight_comments(self):
         """// 单行注释显示为深绿色"""
         self.text.tag_remove("comment", "1.0", tk.END)
@@ -2521,6 +2549,7 @@ class App:
             start, end = m.span()
             self.text.tag_add("comment", f"1.0+{start}c", f"1.0+{end}c")
 
+    @_profile("_highlight_bars")
     def _highlight_bars(self):
         """光标在小节中时：浅色高亮当前小节，更浅色高亮所有同时演奏的小节"""
         self.text.tag_remove("bar_current", "1.0", tk.END)
@@ -2585,6 +2614,7 @@ class App:
         self._diag_timer = None
         self._update_diagnostics()
 
+    @_profile("_do_highlights")
     def _do_highlights(self):
         """执行括号高亮、注释高亮、小节高亮、行号、断点；诊断单独防抖"""
         self._highlight_brackets()

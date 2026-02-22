@@ -5,3 +5,4 @@ workspaces/**/.ascii_choir_breakpoints.json
 .DS_Store
 sound_library/*.py
 sound_library/*.sh
+profile_editor.prof
