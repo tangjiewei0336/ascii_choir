@@ -36,8 +36,8 @@ INSTRUMENT_DISPLAY_NAMES = {
     "guitar_string_g": "吉他弦 G",
     "guitar_string_b": "吉他弦 B",
     "drums": "鼓",
-    "guitar_electrical": "电吉他",
-    "bass_electrical": "电贝斯",
+    "guitar_electric": "电吉他",
+    "bass_electric": "电贝斯",
 }
 
 # GM 鼓表：MIDI -> (名称, 象声词)
@@ -138,6 +138,8 @@ def show_instrument_dialog(
     display_order = ordinary.copy()
     if "guitar" in instruments:
         display_order.append("guitar")
+    if "guitar_electric" in instruments:
+        display_order.append("guitar_electric")
     for s in ("a", "d", "g", "b"):
         key = f"guitar_string_{s}"
         if key in instruments:

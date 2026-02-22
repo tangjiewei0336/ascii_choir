@@ -110,7 +110,7 @@ class TTSEvent:
 
 
 # [cello][guitar] 等乐器标记：对当前行及后续篇章同一声部生效
-VALID_INSTRUMENT_TAGS = {"grand_piano", "piano", "violin", "cello", "trumpet", "clarinet", "oboe", "alto_sax", "tenor_sax", "bass", "guitar", "drums","guitar_electrical","bass_electrical"}
+VALID_INSTRUMENT_TAGS = {"grand_piano", "piano", "violin", "cello", "trumpet", "clarinet", "oboe", "alto_sax", "tenor_sax", "bass", "guitar", "drums", "guitar_electric", "bass_electric"}
 
 
 def _strip_instrument_tag(line: str) -> tuple[str, Optional[str]]:
@@ -1335,7 +1335,24 @@ def parse(text: str, expand_defines: bool = True) -> ParsedScore:
             if line.strip().startswith("&"):
                 line = line.strip()[1:].lstrip()
             # 剥离行首 [cello][guitar][drums] 等乐器标记
-            line, inst_tag = _strip_instrument_tag(line)
+            # 当行以 [8vb]( 或 [8va]( 等开头时，乐器标记可能在括号内，需从 inner 剥离
+            inst_tag = None
+            oct_match = re.match(r"\[(8vb|8va|15va|15vb)\]\s*\(", line, re.I)
+            if oct_match:
+                paren_start = line.index("(")
+                end_p = _find_matching_paren(line, paren_start)
+                if end_p > paren_start:
+                    inner = line[paren_start + 1 : end_p].strip()
+                    inner_stripped, inner_inst = _strip_instrument_tag(inner)
+                    if inner_inst:
+                        inst_tag = inner_inst
+                        line = line[: paren_start + 1] + inner_stripped + line[end_p:]
+                    else:
+                        line, inst_tag = _strip_instrument_tag(line)
+                else:
+                    line, inst_tag = _strip_instrument_tag(line)
+            else:
+                line, inst_tag = _strip_instrument_tag(line)
             if "[drums]" in line.lower():
                 inst_tag = inst_tag or "drums"
             if inst_tag:

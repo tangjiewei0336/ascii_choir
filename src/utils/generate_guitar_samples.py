@@ -2,7 +2,7 @@ import os
 import subprocess
 
 # ====== 用户参数 ======
-OUTPUT_DIR = "/Users/jyimac/code/ascii_choir/sound_library/guitar_electrical"  # TODO 改成你的目标目录
+OUTPUT_DIR = "/Users/jyimac/code/ascii_choir/sound_library/guitar_electric"  # TODO 改成你的目标目录
 MSCORE_PATH = "/Applications/MuseScore 4.app/Contents/MacOS/mscore" # TODO 改成 MuseScore 可执行文件路径
 TEMPO = 80
 MIDI_START = 21
