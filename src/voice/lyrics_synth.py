@@ -69,19 +69,20 @@ def _build_sing_notes_for_entry(
     part_idx: int,
     voice_id: int,
     melody_part: int,
-    part_queue: list[str],
+    part_queue: list[tuple[str, int]],  # (syllable, volume) 支持分段音量
     max_duration_seconds: Optional[float] = None,
-) -> Optional[list[tuple[float, float, Optional[int], str]]]:
-    """为单个 (part_idx, voice_id, melody_part) 构建歌唱音符列表。"""
+) -> Optional[list[tuple[float, float, Optional[int], str, int]]]:
+    """为单个 (part_idx, voice_id, melody_part) 构建歌唱音符列表。返回 (st, dur, midi, lyric, volume)。"""
     sections = score.sections or []
     section_settings = score.section_settings or []
 
     if section_index >= len(sections):
         return None
 
-    result: list[tuple[float, float, Optional[int], str]] = []
+    result: list[tuple[float, float, Optional[int], str, int]] = []
     global_beat = 0.0
     queue = list(part_queue)
+    default_vol = 60
 
     for sec_idx in range(section_index, len(sections)):
         section = sections[sec_idx]
@@ -116,14 +117,17 @@ def _build_sing_notes_for_entry(
                         continue
                     if max_duration_seconds is not None and st + dur > max_duration_seconds:
                         dur = max_duration_seconds - st
-                    result.append((st, dur, None, ""))
+                    result.append((st, dur, None, "", default_vol))
                     cursor += ev.duration_beats
                     continue
                 lyric = ""
+                vol = default_vol
                 if getattr(ev, "lyric", None):
                     lyric = ev.lyric
                 elif queue:
-                    lyric = queue.pop(0)
+                    item = queue.pop(0)
+                    lyric = item[0] if isinstance(item, tuple) else item
+                    vol = item[1] if isinstance(item, tuple) and len(item) > 1 else default_vol
                 if isinstance(ev, NoteEvent):
                     st = start_beat / beats_per_second
                     dur = ev.duration_beats / beats_per_second
@@ -134,10 +138,10 @@ def _build_sing_notes_for_entry(
                         dur = max_duration_seconds - st
                     midi = ev.midi
                     if _is_hold_lyric(lyric) and result:
-                        prev_st, prev_dur, prev_midi, prev_lyric = result[-1]
-                        result[-1] = (prev_st, prev_dur + dur, prev_midi, prev_lyric)
+                        prev_st, prev_dur, prev_midi, prev_lyric, prev_vol = result[-1]
+                        result[-1] = (prev_st, prev_dur + dur, prev_midi, prev_lyric, prev_vol)
                     else:
-                        result.append((st, dur, midi, lyric))
+                        result.append((st, dur, midi, lyric, vol))
                     cursor += ev.duration_beats
                 elif isinstance(ev, ChordEvent):
                     st = start_beat / beats_per_second
@@ -149,10 +153,10 @@ def _build_sing_notes_for_entry(
                         dur = max_duration_seconds - st
                     midi = ev.midis[melody_part] if melody_part < len(ev.midis) else ev.midis[0]
                     if _is_hold_lyric(lyric) and result:
-                        prev_st, prev_dur, prev_midi, prev_lyric = result[-1]
-                        result[-1] = (prev_st, prev_dur + dur, prev_midi, prev_lyric)
+                        prev_st, prev_dur, prev_midi, prev_lyric, prev_vol = result[-1]
+                        result[-1] = (prev_st, prev_dur + dur, prev_midi, prev_lyric, prev_vol)
                     else:
-                        result.append((st, dur, midi, lyric))
+                        result.append((st, dur, midi, lyric, vol))
                     cursor += ev.duration_beats
 
     return result if result else None
@@ -189,16 +193,20 @@ def _build_sing_notes(
         return None
     part_idx, voice_id, melody_part = entry
 
-    # 该声部的音节队列（同一声部多个 \\lyrics 会合并）
-    part_queue: list[str] = []
-    for pidx, s, _, _, _ in sec_lyrics:
+    # 该声部的音节队列（同一声部多个 \\lyrics 会合并，带分段音量）
+    part_queue: list[tuple[str, int]] = []
+    for pidx, s, _, _, vol in sec_lyrics:
         if pidx == part_idx:
-            part_queue.extend(s)
+            part_queue.extend((sy, vol) for sy in s)
 
     result = _build_sing_notes_for_entry(
         score, section_index, part_idx, voice_id, melody_part, part_queue, max_duration_seconds
     )
-    return (voice_id, result) if result else None
+    if result:
+        # 对外接口仍返回 4 元组（无 volume），兼容调用方
+        stripped = [(st, dur, midi, lyric) for st, dur, midi, lyric, _ in result]
+        return (voice_id, stripped)
+    return None
 
 
 def _is_hold_lyric(lyric: str) -> bool:
@@ -207,6 +215,24 @@ def _is_hold_lyric(lyric: str) -> bool:
         return True
     s = lyric.strip()
     return s in ("-", "ー", "−", "―")
+
+
+def _apply_gain_envelope(
+    audio: np.ndarray, sample_rate: int,
+    notes: list[tuple[float, float, Optional[int], str, int]],
+) -> np.ndarray:
+    """根据每音符的 volume 对音频施加增益包络。notes 为 (st, dur, midi, lyric, volume)。"""
+    if len(notes) == 0:
+        return audio
+    out = audio.copy()
+    n = len(out)
+    for st, dur, _, _, vol in notes:
+        gain = vol / 100.0
+        start_samp = int(st * sample_rate)
+        end_samp = min(int((st + dur) * sample_rate), n)
+        if start_samp < end_samp:
+            out[start_samp:end_samp] *= gain
+    return out
 
 
 def _notes_to_voicevox_format(
@@ -284,18 +310,20 @@ def _synthesize_section(
         return None
     sec_lyrics = section_lyrics[section_index]
 
-    # 收集所有带 voice_id 的条目（有 override 时覆盖）
-    entries: list[tuple[int, int, int, list[str], int]] = []  # (part_idx, voice_id, melody_part, part_queue, volume)
+    # 收集所有带 voice_id 的条目。同 part 多段 lyrics 合并为 (syllable, volume) 队列，支持分段音量
+    entries: list[tuple[int, int, int, list[tuple[str, int]], int]] = []  # (part_idx, voice_id, melody_part, part_queue, n_lyrics_this_part)
     seen_parts: set[int] = set()
     for part_idx, syllables, voice_id, melody_part, volume in sec_lyrics:
         effective_id = voice_id_override if voice_id_override is not None else voice_id
         if effective_id is not None and syllables and part_idx not in seen_parts:
             seen_parts.add(part_idx)
-            part_queue: list[str] = []
-            for pidx, s, _, _, _ in sec_lyrics:
+            part_queue: list[tuple[str, int]] = []
+            n_lyrics = 0
+            for pidx, s, _, _, vol in sec_lyrics:
                 if pidx == part_idx:
-                    part_queue.extend(s)
-            entries.append((part_idx, effective_id, melody_part, part_queue, volume))
+                    part_queue.extend((sy, vol) for sy in s)
+                    n_lyrics += 1
+            entries.append((part_idx, effective_id, melody_part, part_queue, n_lyrics))
 
     if not entries:
         return None
@@ -303,22 +331,25 @@ def _synthesize_section(
     mixed: Optional[np.ndarray] = None
     max_len = 0
     n_entries = len(entries)
+    n_lyrics_total = sum(e[4] for e in entries)  # 总 lyrics 段数，用于进度显示
+    lyrics_done = 0
 
-    for idx, (part_idx, voice_id, melody_part, part_queue, volume) in enumerate(entries):
+    for idx, (part_idx, voice_id, melody_part, part_queue, n_lyrics_part) in enumerate(entries):
         notes = _build_sing_notes_for_entry(
             score, section_index, part_idx, voice_id, melody_part, part_queue, max_duration_seconds
         )
         if not notes:
             continue
-        audio = _synthesize_one_voice(notes, voice_id, sample_rate, base_url)
+        notes_for_api = [(st, dur, midi, lyric) for st, dur, midi, lyric, _ in notes]
+        audio = _synthesize_one_voice(notes_for_api, voice_id, sample_rate, base_url)
         if on_progress:
             try:
-                on_progress(idx + 1, n_entries)
+                lyrics_done += n_lyrics_part
+                on_progress(lyrics_done, n_lyrics_total)
             except Exception:
                 pass
         if audio is not None:
-            gain = volume / 100.0
-            audio = audio * gain
+            audio = _apply_gain_envelope(audio, sample_rate, notes)
             if mixed is None:
                 mixed = np.zeros_like(audio)
             target_len = max(len(mixed), len(audio))

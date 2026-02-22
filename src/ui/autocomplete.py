@@ -137,12 +137,14 @@ class AutocompletePopup:
         trigger_pos: int,
         prefix: str,
         on_select: Callable[[str], None],
+        on_close: Callable[[], None] | None = None,
     ):
         self.text_widget = text_widget
         self.suggestions = suggestions
         self.trigger_pos = trigger_pos
         self.prefix = prefix
         self.on_select = on_select
+        self.on_close = on_close
         self.selected_index = 0
 
         self.popup = tk.Toplevel(parent)
@@ -241,6 +243,8 @@ class AutocompletePopup:
 
     def close(self):
         try:
+            if self.on_close:
+                self.on_close()
             self.popup.destroy()
         except tk.TclError:
             pass

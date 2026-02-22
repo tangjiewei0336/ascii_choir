@@ -2623,6 +2623,9 @@ class App:
         """处理输入框内点击/释放，更新状态栏；拖放由 _on_global_drop_check 处理"""
         self.text.tag_raise("sel")  # 选区显示在高亮之上
         self._on_cursor_move(event)
+        # 点击后光标已移动，若新位置前无 \ 或 [ 则关闭补全，避免回车误替换
+        if event and event.widget == self.text:
+            self._try_autocomplete(event)
 
     def _update_duration_buttons_state(self):
         """无选区时灰掉时值按钮"""
@@ -3007,10 +3010,14 @@ class App:
                 self._autocomplete_popup.close()
                 self._autocomplete_popup = None
 
+        def on_close():
+            self._autocomplete_popup = None
+
         if self._autocomplete_popup:
             self._autocomplete_popup.update_suggestions(suggestions)
             self._autocomplete_popup.prefix = prefix
             self._autocomplete_popup.on_select = on_select
+            self._autocomplete_popup.on_close = on_close
         else:
             self._autocomplete_popup = AutocompletePopup(
                 self.root,
@@ -3019,6 +3026,7 @@ class App:
                 trigger_pos,
                 prefix,
                 on_select,
+                on_close=on_close,
             )
 
     def _on_autocomplete_nav(self, event):
@@ -3033,8 +3041,13 @@ class App:
     def _on_autocomplete_return(self, event):
         """补全弹窗打开时，回车插入选中项"""
         if self._autocomplete_popup:
-            self._autocomplete_popup._on_enter()
-            return "break"
+            try:
+                if self._autocomplete_popup.popup.winfo_exists():
+                    self._autocomplete_popup._on_enter()
+                    return "break"
+            except tk.TclError:
+                pass
+            self._autocomplete_popup = None
 
     def _on_autocomplete_escape(self, event):
         """补全弹窗打开时，Escape 关闭"""

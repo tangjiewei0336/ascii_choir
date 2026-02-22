@@ -122,7 +122,7 @@ def _merge_tied_events(
             i = j
             continue
         if isinstance(ev, GlissEvent):
-            # 滑音：生成半音序列，快速连续播放模拟滑音效果
+            # 滑音：生成半音序列，快速连续播放模拟滑音效果。每音持续 +50% 改善听感（音符重叠更顺滑）
             lo, hi = min(ev.start_midi, ev.end_midi), max(ev.start_midi, ev.end_midi)
             chromatic = list(range(lo, hi + 1)) if ev.start_midi <= ev.end_midi else list(range(ev.start_midi, ev.end_midi - 1, -1))
             n = len(chromatic)
@@ -130,10 +130,11 @@ def _merge_tied_events(
                 n = 1
                 chromatic = [ev.start_midi]
             step_beats = ev.duration_beats / n
+            note_dur = step_beats * 1.5  # 每音持续 +50%，音符重叠更顺滑
             dist = getattr(ev, "distortion", 0.0)
             for idx, m in enumerate(chromatic):
                 note_start = start_beat + idx * step_beats
-                result.append((note_start, step_beats, [m], ev.volume, False, dist))
+                result.append((note_start, note_dur, [m], ev.volume, False, dist))
             i += 1
             continue
         if isinstance(ev, TrillEvent):

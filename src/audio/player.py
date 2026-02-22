@@ -441,14 +441,14 @@ class Player:
 
                 n_voices = len(lyrics_parts)
                 if self._on_progress:
-                    self._on_progress(seg_idx, total_work, "generating", f"VOICEVOX 歌声生成中 0/{n_voices} 声部")
+                    self._on_progress(seg_idx, total_work, "generating", f"VOICEVOX 歌声生成中 0/? 段")
 
                 def _lyrics_progress(voice_cur: int, voice_tot: int):
                     if self._on_progress and voice_tot > 0:
                         frac = seg_idx + (voice_cur / voice_tot) * (j - seg_idx)
                         self._on_progress(
                             frac, total_work, "generating",
-                            f"VOICEVOX 歌声生成中 {voice_cur}/{voice_tot} 声部"
+                            f"VOICEVOX 歌声生成中 {voice_cur}/{voice_tot} 段"
                         )
 
                 lyrics_ck = cache_key_lyrics_from_parsed(parsed, seg.section_index, self.sample_rate)
