@@ -56,6 +56,7 @@ class NoteEvent:
     midi: int
     duration_beats: float
     volume: float = 0.6
+    distortion: float = 0.0  # 0-1，电吉他失真度，仅 guitar_electric 生效
     lyric: Optional[str] = None  # 行内歌词，如 1(啊)
     tied_to_next: bool = False
     tied_from_prev: bool = False
@@ -67,6 +68,7 @@ class ChordEvent:
     midis: list[int]
     duration_beats: float
     volume: float = 0.6
+    distortion: float = 0.0  # 0-1，电吉他失真度
     lyric: Optional[str] = None  # 行内歌词
     tied_to_next: bool = False
     tied_from_prev: bool = False
@@ -86,6 +88,7 @@ class GlissEvent:
     end_midi: int
     duration_beats: float
     volume: float = 0.6
+    distortion: float = 0.0
 
 
 @dataclass
@@ -97,6 +100,7 @@ class TrillEvent:
     duration_beats: float
     volume: float = 0.6
     lower_midi: Optional[int] = None  # 下颤音时使用
+    distortion: float = 0.0
 
 
 @dataclass
@@ -439,6 +443,7 @@ def _parse_notation_scope(
     n = len(content)
     prev_note_midi: Optional[int] = None  # 用于 ~ 连音线
     volume = default_volume
+    distortion = 0.0  # 0-1，[distortion:N] 或 [drive:N]，电吉他失真度
     tie_target_ev: Optional[NoteEvent | ChordEvent] = None  # ~ 跨小节时，后续 - 继续延长该音
     tie_target_bar: Optional[BarContent] = None
     next_arpeggio = False  # [a] 无括号时，作用于下一个音
@@ -521,7 +526,7 @@ def _parse_notation_scope(
         dur = base_duration * (1 + ext) * (0.5**shrt)  # - 增加一拍，非乘2
         oct_final = part_octave - left_dots + right_dots
         midi = _simplified_to_midi(num, oct_final, acc, tonality_offset)
-        return NoteEvent(midi=midi, duration_beats=dur, volume=volume, arpeggio=apply_arpeggio)
+        return NoteEvent(midi=midi, duration_beats=dur, volume=volume, arpeggio=apply_arpeggio, distortion=distortion)
 
     bar_accidentals: dict[int, int] = {}  # 小节内各音级的临时升降号：1-7 -> 0/1/-1/2
 
@@ -621,6 +626,8 @@ def _parse_notation_scope(
                     volume = min(1.0, volume + 0.1)  # 简化
                 elif notation_lower in ("decrescendo", "d"):
                     volume = max(0.2, volume - 0.1)
+                elif (m := re.match(r"^(distortion|drive):(\d+)$", notation_lower)):
+                    distortion = min(1.0, max(0.0, int(m.group(2)) / 100.0))  # 0-100 -> 0-1
                 elif notation_lower in ("deviation explicit on",):
                     deviation_explicit = True
                 elif notation_lower in ("deviation explicit off",):
@@ -672,6 +679,7 @@ def _parse_notation_scope(
                     if last_ev is not None and isinstance(last_ev, (NoteEvent, ChordEvent)):
                         last_ev.tied_to_next = True
                         add_dur = base_duration
+                        dist = getattr(last_ev, "distortion", distortion)
                         if isinstance(last_ev, NoteEvent):
                             new_ev = NoteEvent(
                                 midi=last_ev.midi,
@@ -679,6 +687,7 @@ def _parse_notation_scope(
                                 volume=last_ev.volume,
                                 tied_from_prev=True,
                                 arpeggio=get_arpeggio_for_event(),
+                                distortion=dist,
                             )
                         else:
                             tied_midis = [m for m in last_ev.midis]
@@ -689,6 +698,7 @@ def _parse_notation_scope(
                                 tied_from_prev=True,
                                 tied_from_prev_midis=tied_midis,
                                 arpeggio=get_arpeggio_for_event(),
+                                distortion=dist,
                             )
                         current_bar.events.append(new_ev)
                         bar_beats += add_dur
@@ -733,6 +743,7 @@ def _parse_notation_scope(
                                 end_midi=last_midi,
                                 duration_beats=total_dur,
                                 volume=volume,
+                                distortion=distortion,
                             )
                             current_bar.events.append(gliss_ev)
                             bar_beats += total_dur
@@ -775,6 +786,7 @@ def _parse_notation_scope(
                                 duration_beats=total_dur,
                                 volume=volume,
                                 lower_midi=lower_midi_val,
+                                distortion=distortion,
                             )
                             current_bar.events.append(trill_ev)
                             bar_beats += total_dur
@@ -923,15 +935,15 @@ def _parse_notation_scope(
                         if tied_from_prev and prev_ev is not None:
                             prev_ev.tied_to_next = True
                         if kind == "chord":
-                            ev = ChordEvent(midis=midis, duration_beats=each, volume=volume, tied_from_prev=tied_from_prev, arpeggio=get_arpeggio_for_event())
+                            ev = ChordEvent(midis=midis, duration_beats=each, volume=volume, tied_from_prev=tied_from_prev, arpeggio=get_arpeggio_for_event(), distortion=distortion)
                             current_bar.events.append(ev)
                             prev_ev = ev
                         elif len(midis) == 1:
-                            ev = NoteEvent(midi=midis[0], duration_beats=each, volume=volume, tied_from_prev=tied_from_prev, arpeggio=get_arpeggio_for_event())
+                            ev = NoteEvent(midi=midis[0], duration_beats=each, volume=volume, tied_from_prev=tied_from_prev, arpeggio=get_arpeggio_for_event(), distortion=distortion)
                             current_bar.events.append(ev)
                             prev_ev = ev
                         else:
-                            ev = ChordEvent(midis=midis, duration_beats=each, volume=volume, tied_from_prev=tied_from_prev, arpeggio=get_arpeggio_for_event())
+                            ev = ChordEvent(midis=midis, duration_beats=each, volume=volume, tied_from_prev=tied_from_prev, arpeggio=get_arpeggio_for_event(), distortion=distortion)
                             current_bar.events.append(ev)
                             prev_ev = ev
                     bar_beats += each
@@ -1025,7 +1037,8 @@ def _parse_notation_scope(
                 if chord_midis and last_ev is not None:
                     last_ev.tied_to_next = True
                     tied_midis = [m for m in chord_midis if m in getattr(last_ev, "midis", [last_ev.midi] if hasattr(last_ev, "midi") else [])]
-                    new_ev = ChordEvent(midis=chord_midis, duration_beats=add_dur, volume=last_ev.volume, lyric=inline_lyric, tied_from_prev=True, tied_from_prev_midis=tied_midis, arpeggio=get_arpeggio_for_event())
+                    dist_tie = getattr(last_ev, "distortion", distortion)
+                    new_ev = ChordEvent(midis=chord_midis, duration_beats=add_dur, volume=last_ev.volume, lyric=inline_lyric, tied_from_prev=True, tied_from_prev_midis=tied_midis, arpeggio=get_arpeggio_for_event(), distortion=dist_tie)
                     current_bar.events.append(new_ev)
                     bar_beats += add_dur
                     if last_in_current:
@@ -1041,7 +1054,7 @@ def _parse_notation_scope(
                     # 仅同音高时连音；[-3] 等和声作用域内需输出 ChordEvent 以正确匹配
                     if isinstance(last_ev, NoteEvent) and last_ev.midi == ev.midi:
                         last_ev.tied_to_next = True
-                        new_ev = NoteEvent(midi=ev.midi, duration_beats=add_dur, volume=ev.volume, lyric=inline_lyric, tied_from_prev=True, arpeggio=get_arpeggio_for_event())
+                        new_ev = NoteEvent(midi=ev.midi, duration_beats=add_dur, volume=ev.volume, lyric=inline_lyric, tied_from_prev=True, arpeggio=get_arpeggio_for_event(), distortion=getattr(ev, "distortion", distortion))
                         current_bar.events.append(new_ev)
                         bar_beats += add_dur
                         if last_in_current:
@@ -1054,7 +1067,7 @@ def _parse_notation_scope(
                         last_ev.tied_to_next = True
                         midis = add_harmony([ev.midi], harmony, i)
                         tied_midis = [m for m in midis if m in last_ev.midis]
-                        new_ev = ChordEvent(midis=midis, duration_beats=add_dur, volume=last_ev.volume, lyric=inline_lyric, tied_from_prev=True, tied_from_prev_midis=tied_midis, arpeggio=get_arpeggio_for_event())
+                        new_ev = ChordEvent(midis=midis, duration_beats=add_dur, volume=last_ev.volume, lyric=inline_lyric, tied_from_prev=True, tied_from_prev_midis=tied_midis, arpeggio=get_arpeggio_for_event(), distortion=getattr(last_ev, "distortion", distortion))
                         current_bar.events.append(new_ev)
                         bar_beats += add_dur
                         if last_in_current:
@@ -1092,7 +1105,7 @@ def _parse_notation_scope(
                 max_dur = base_duration / 2
             chord_midis = add_harmony(chord_midis, harmony, i)
             if chord_midis:
-                current_bar.events.append(ChordEvent(midis=chord_midis, duration_beats=max_dur, volume=volume, lyric=inline_lyric, arpeggio=get_arpeggio_for_event()))
+                current_bar.events.append(ChordEvent(midis=chord_midis, duration_beats=max_dur, volume=volume, lyric=inline_lyric, arpeggio=get_arpeggio_for_event(), distortion=distortion))
                 bar_beats += max_dur
                 tie_target_ev = None
                 tie_target_bar = None
@@ -1110,9 +1123,9 @@ def _parse_notation_scope(
             else:
                 midis = add_harmony([ev.midi], harmony, i)
                 if len(midis) == 1:
-                    current_bar.events.append(NoteEvent(midi=midis[0], duration_beats=ev.duration_beats, volume=ev.volume, lyric=inline_lyric, arpeggio=getattr(ev, "arpeggio", False)))
+                    current_bar.events.append(NoteEvent(midi=midis[0], duration_beats=ev.duration_beats, volume=ev.volume, lyric=inline_lyric, arpeggio=getattr(ev, "arpeggio", False), distortion=getattr(ev, "distortion", distortion)))
                 else:
-                    current_bar.events.append(ChordEvent(midis=midis, duration_beats=ev.duration_beats, volume=ev.volume, lyric=inline_lyric, arpeggio=getattr(ev, "arpeggio", False)))
+                    current_bar.events.append(ChordEvent(midis=midis, duration_beats=ev.duration_beats, volume=ev.volume, lyric=inline_lyric, arpeggio=getattr(ev, "arpeggio", False), distortion=getattr(ev, "distortion", distortion)))
                 bar_beats += ev.duration_beats
             tie_target_ev = None
             tie_target_bar = None

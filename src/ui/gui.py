@@ -228,6 +228,7 @@ HELP_ENTRIES: list[tuple[str, str, str]] = [
     ("[gliss]", "[gliss](1 5)", "滑音：从起音滑到止音，默认 1 拍。可用 | 或 _ 改变时长。"),
     ("[r]", "[r]", "重复上一个音，支持连音线。可用 - 和 _ 调整时值。"),
     ("[tr]", "[tr](1) 或 [tr] 1 - (.5 1 2 3)_", "颤音：主音与上方音快速交替。[tr+] 上颤音、[tr-] 下颤音。可用 - 和 _ 调整时值。"),
+    ("[distortion]", "[guitar_electric][distortion:50]", "电吉他失真度 0-100。[drive:N] 同义。仅对 guitar_electric、bass_electric 生效。"),
     ("[dc][fine]", "[dc]|1 2|[fine]|3 4|", "反复记号：[dc] 从头反复，[fine] 结束。常用于 D.C. al Fine 结构。"),
     ("// 注释", "// 这是注释", "双斜杠开始单行注释，该行内容不会被解析。"),
     ("\\tonality", "\\tonality{0}", "设置调性。0 表示 C 大调，数字为半音偏移。如 \\tonality{2} 为 D 大调。"),

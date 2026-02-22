@@ -314,6 +314,14 @@ brew install ffmpeg
 ### 音色与乐器
 行首 `[cello]`、`[guitar]`、`[drums]` 等指定该声部乐器。鼓声部 `[drums]` 使用 GM 打击乐映射，鼓声库需先运行 `sound_library/build_drums.py` 从原始素材生成。
 
+#### 电吉他失真度
+`[distortion:N]` 或 `[drive:N]`（N 为 0–100）控制电吉他/电贝司的合成失真度。0 为原声，100 为最大失真。仅对 `[guitar_electric]`、`[bass_electric]` 生效。
+
+```text
+& [guitar_electric][distortion:50]|1 2 3 4|   # 50% 失真
+& [guitar_electric][drive:80]|5 6 7 1|        # 80% 失真
+```
+
 #### GM 鼓表（[drums] 声部 MIDI 映射）
 
 鼓声部使用与旋律一致的简谱格式（`.1`、`.2`、`..#4` 等），便于对齐。C 大调（`\tonality{0}`）下示例：

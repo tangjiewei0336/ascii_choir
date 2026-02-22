@@ -31,6 +31,7 @@ BRACKET_NOTATIONS = [
     "ff", "f", "mf", "mp", "p", "pp", "ppp",
     "dc", "fine", "a", "arpeggio", "gliss", "r", "tr",
     "+3", "-3", "+5", "-5",
+    "distortion:50", "drive:80",  # 电吉他失真 0-100
 ]
 BRACKET_NOTATIONS_WITH_SCOPE = {"8vb", "8va", "15va", "15vb", "a", "arpeggio", "gliss", "tr"}
 

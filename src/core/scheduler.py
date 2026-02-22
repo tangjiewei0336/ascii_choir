@@ -23,13 +23,14 @@ class ScheduledNote:
     part_index: int = 0  # 声部索引，用于歌词合成时筛选旋律
     is_continuation: bool = False  # 连音延续，不重新触发，需与前一音合并
     instrument: str = "grand_piano"  # 音色，由 [cello][guitar] 等标记指定
+    distortion: float = 0.0  # 0-1，电吉他失真度，仅 guitar_electric 生效
 
 
 def _merge_tied_events(
     events_with_start: list[tuple[float, "NoteEvent | ChordEvent | RestEvent | GlissEvent | TrillEvent"]],
-) -> list[tuple[float, float, list[int], float, bool]]:
+) -> list[tuple[float, float, list[int], float, bool, float]]:
     """
-    合并连音事件，返回 [(start_beat, duration, midis, volume, is_continuation), ...]。
+    合并连音事件，返回 [(start_beat, duration, midis, volume, is_continuation, distortion), ...]。
     播放时连音为一个持续音，不重复触发。
     和弦内各音保持相同时值；连音延续单独输出并标记 is_continuation，由播放器合并。
     """
@@ -51,7 +52,8 @@ def _merge_tied_events(
                     j += 1
                 else:
                     break
-            result.append((start_beat, dur, [ev.midi], vol, False))
+            dist = getattr(ev, "distortion", 0.0)
+            result.append((start_beat, dur, [ev.midi], vol, False, dist))
             i = j
             continue
         if isinstance(ev, ChordEvent):
@@ -96,25 +98,27 @@ def _merge_tied_events(
                 # 连音延续：所有音同时结束（chord_end + tied_dur），续时从各音各自结束处开始
                 chord_end = start_beat + ev.duration_beats
                 common_end = chord_end + tied_dur
+                dist = getattr(ev, "distortion", 0.0)
                 for idx, m in enumerate(sorted_midis):
                     note_start = start_beat + idx * delay_beats
                     note_dur = ev.duration_beats - (n - 1 - idx) * delay_beats
                     if note_dur > 0:
-                        result.append((note_start, note_dur, [m], vol, False))
+                        result.append((note_start, note_dur, [m], vol, False, dist))
                     if merge_dur_by_midi.get(m, 0) > 0:
                         note_end = note_start + note_dur
                         cont_dur = common_end - note_end
                         if cont_dur > 0:
-                            result.append((note_end, cont_dur, [m], vol, True))
+                            result.append((note_end, cont_dur, [m], vol, True, dist))
             else:
+                dist = getattr(ev, "distortion", 0.0)
                 # 和弦整体：各音相同时值
-                result.append((start_beat, ev.duration_beats, list(ev.midis), vol, False))
+                result.append((start_beat, ev.duration_beats, list(ev.midis), vol, False, dist))
                 # 连音延续：从和弦结束后开始
                 for m in ev.midis:
                     if merge_dur_by_midi.get(m, 0) > 0:
-                        result.append((start_beat + ev.duration_beats, merge_dur_by_midi[m], [m], vol, True))
+                        result.append((start_beat + ev.duration_beats, merge_dur_by_midi[m], [m], vol, True, dist))
             for nxt_start, nxt_dur, m in extra_notes:
-                result.append((nxt_start, nxt_dur, [m], vol, False))
+                result.append((nxt_start, nxt_dur, [m], vol, False, dist))
             i = j
             continue
         if isinstance(ev, GlissEvent):
@@ -126,9 +130,10 @@ def _merge_tied_events(
                 n = 1
                 chromatic = [ev.start_midi]
             step_beats = ev.duration_beats / n
+            dist = getattr(ev, "distortion", 0.0)
             for idx, m in enumerate(chromatic):
                 note_start = start_beat + idx * step_beats
-                result.append((note_start, step_beats, [m], ev.volume, False))
+                result.append((note_start, step_beats, [m], ev.volume, False, dist))
             i += 1
             continue
         if isinstance(ev, TrillEvent):
@@ -136,10 +141,11 @@ def _merge_tied_events(
             n_osc = max(8, int(ev.duration_beats * 8))  # 约每秒 8 次交替 @ 1 beat
             step_beats = ev.duration_beats / n_osc
             alt_midi = ev.lower_midi if ev.lower_midi is not None else ev.upper_midi
+            dist = getattr(ev, "distortion", 0.0)
             for idx in range(n_osc):
                 m = alt_midi if idx % 2 else ev.main_midi
                 note_start = start_beat + idx * step_beats
-                result.append((note_start, step_beats, [m], ev.volume, False))
+                result.append((note_start, step_beats, [m], ev.volume, False, dist))
             i += 1
             continue
         i += 1
@@ -181,8 +187,9 @@ def _part_events_to_scheduled(
             part_index=part_index,
             is_continuation=is_cont,
             instrument=instrument,
+            distortion=dist,
         )
-        for start, dur, midis, vol, is_cont in merged
+        for start, dur, midis, vol, is_cont, dist in merged
     ]
 
 
@@ -301,6 +308,7 @@ def schedule(score: ParsedScore) -> list[ScheduledNote]:
                 part_index=n.part_index,
                 is_continuation=getattr(n, "is_continuation", False),
                 instrument=getattr(n, "instrument", "grand_piano"),
+                distortion=getattr(n, "distortion", 0.0),
             ))
         if seg.notes:
             t_offset += max(n.start_time + n.duration for n in seg.notes)
@@ -351,6 +359,7 @@ def schedule_segments(score: ParsedScore) -> list[ScheduledSegment]:
                 n.start_time - seg_start, n.duration, n.midis, n.volume, n.part_index,
                 is_continuation=getattr(n, "is_continuation", False),
                 instrument=getattr(n, "instrument", "grand_piano"),
+                distortion=getattr(n, "distortion", 0.0),
             )
             for n in notes1
         ]
@@ -381,6 +390,7 @@ def schedule_segments(score: ParsedScore) -> list[ScheduledSegment]:
                     ScheduledNote(n.start_time - seg_s, n.duration, n.midis, n.volume, n.part_index,
                         is_continuation=getattr(n, "is_continuation", False),
                         instrument=getattr(n, "instrument", "grand_piano"),
+                        distortion=getattr(n, "distortion", 0.0),
                     )
                     for n in nd
                 ]

@@ -107,6 +107,7 @@ class Player:
                 # 找到：合并延续
                 merged = True
                 inst = getattr(prev, "instrument", "grand_piano")
+                dist = getattr(prev, "distortion", 0.0)
                 if len(prev.midis) == 1:
                     # 单音：直接延长
                     result[i] = ScheduledNote(
@@ -114,6 +115,7 @@ class Player:
                         prev.midis, prev.volume, prev.part_index,
                         is_continuation=False,
                         instrument=inst,
+                        distortion=dist,
                     )
                 else:
                     # 和弦：拆出被 tie 的音单独延长，其余保持
@@ -124,11 +126,13 @@ class Player:
                             prev.start_time, prev.duration, others,
                             prev.volume, prev.part_index, is_continuation=False,
                             instrument=inst,
+                            distortion=dist,
                         ))
                     result.append(ScheduledNote(
                         prev.start_time, prev.duration + n.duration, [midi],
                         prev.volume, prev.part_index, is_continuation=False,
                         instrument=inst,
+                        distortion=dist,
                     ))
                     # 和弦拆开后需按 start_time 排序
                     result.sort(key=lambda x: (x.start_time, -len(x.midis)))
@@ -175,9 +179,17 @@ class Player:
                     wav = np.pad(wav, (0, target_len - len(wav)), mode="constant")
                 
                 gain = n.volume
+                wav_slice = wav * gain
+                # 电吉他失真：经典 tanh 软削波
+                dist = getattr(n, "distortion", 0.0)
+                if dist > 0 and inst in ("guitar_electric", "bass_electric"):
+                    pre_gain = 1.0 + dist * 3.0   # 前置增益，让信号进入饱和区
+                    drive = 1.0 + dist * 14.0    # 0->1, 100%->15
+                    wav_slice = wav_slice * pre_gain
+                    wav_slice = np.tanh(wav_slice * drive)
                 end_sample = min(start_sample + len(wav), total_samples)
                 actual_len = end_sample - start_sample
-                mix[start_sample:end_sample] += wav[:actual_len] * gain
+                mix[start_sample:end_sample] += wav_slice[:actual_len]
         
         # 归一化防止削波
         max_val = np.abs(mix).max()
