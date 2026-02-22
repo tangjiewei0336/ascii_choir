@@ -1,6 +1,7 @@
 """
 简谱演奏程序 GUI
 """
+import json
 import re
 import sys
 import subprocess
@@ -288,6 +289,38 @@ def _save_last_workspace(path: Path) -> None:
         cfg.write_text(str(path.resolve()), encoding="utf-8")
     except Exception:
         pass
+
+
+def _load_last_file_in_workspace(workspace: Path) -> Path | None:
+    """读取该工作区上次打开的文件路径"""
+    cfg = _config_dir() / "workspace_state.json"
+    if not cfg.exists():
+        return None
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        ws = str(workspace.resolve())
+        path_str = data.get(ws)
+        if not path_str:
+            return None
+        path = Path(path_str)
+        return path if path.is_file() else None
+    except Exception:
+        return None
+
+
+def _save_last_file_in_workspace(workspace: Path, file_path: Path) -> None:
+    """保存该工作区当前打开的文件路径"""
+    cfg = _config_dir() / "workspace_state.json"
+    try:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if cfg.exists():
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+        data[str(workspace.resolve())] = str(file_path.resolve())
+        cfg.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
 
 # 示例工作区文件内容
 EXAMPLE_FILES = {
@@ -1029,6 +1062,8 @@ class App:
             self.text.edit_reset()
             self.current_file_path = path
             self.root.title(f"简谱演奏 - {path.name}")
+            if self.workspace_root and path.parent.resolve() == self.workspace_root.resolve():
+                _save_last_file_in_workspace(self.workspace_root, path)
             base = self._get_breakpoint_base_dir()
             self._breakpoints = set(load_breakpoints(base, path.name)) if base else set()
             self._clamp_breakpoints_to_line_count(len(content.splitlines()))
@@ -1060,6 +1095,8 @@ class App:
             prev_path = self.current_file_path
             self.current_file_path = path
             self.root.title(f"简谱演奏 - {path.name}")
+            if self.workspace_root and path.parent.resolve() == self.workspace_root.resolve():
+                _save_last_file_in_workspace(self.workspace_root, path)
             if prev_path != path:
                 base = self._get_breakpoint_base_dir()
                 self._breakpoints = set(load_breakpoints(base, path.name)) if base else set()
@@ -1102,6 +1139,14 @@ class App:
         self._workspace_frame.config(text=f"工作区: {name}")
         self._refresh_workspace_list()
         _save_last_workspace(path)
+        # 切换工作区时加载该工作区上次打开的文件，否则加载第一个（仅当编辑器已创建时）
+        files = self._get_workspace_files()
+        if files and hasattr(self, "text"):
+            last_file = _load_last_file_in_workspace(path)
+            target = last_file if (last_file and last_file in files) else files[0]
+            idx = files.index(target)
+            self._workspace_list.selection_set(idx)
+            self._load_file(target)
     
     def _refresh_workspace_list(self):
         """刷新左侧工作区文件列表"""
@@ -1310,14 +1355,21 @@ class App:
         last = _load_last_workspace()
         initial_workspace = last if last else EXAMPLE_WORKSPACE
         self._set_workspace(initial_workspace)
-        # 默认选中并加载第一个文件
+        # 优先加载该工作区上次打开的文件，否则加载第一个
         files = self._get_workspace_files()
         if files:
-            self._workspace_list.selection_set(0)
-            first_file = files[0]
-            if first_file.exists():
-                self.current_file_path = first_file
-                self.root.title(f"简谱演奏 - {first_file.name}")
+            last_file = _load_last_file_in_workspace(self.workspace_root)
+            target = None
+            if last_file and last_file in files:
+                target = last_file
+            if not target:
+                target = files[0]
+            idx = files.index(target)
+            self._workspace_list.selection_set(idx)
+            if target.exists():
+                self.current_file_path = target
+                self.root.title(f"简谱演奏 - {target.name}")
+                _save_last_file_in_workspace(self.workspace_root, target)
         
         # 右侧主内容区
         main = ttk.Frame(main_container)
@@ -1651,7 +1703,9 @@ class App:
             while i < n:
                 c = s[i]
                 # 检测 ]( 进入记号作用域；嵌套 ]( 如 [gliss](.1 1) [gliss](1 .1) 需累加深度
+                # ] 会关闭前面的 [，需先 decrement depth，否则后续 | 无法正确拆分
                 if c == "]" and i + 1 < n and s[i + 1] == "(":
+                    depth -= 1  # ] 关闭 [gliss] 等
                     cur.append(c)
                     i += 1
                     if in_notation_scope:

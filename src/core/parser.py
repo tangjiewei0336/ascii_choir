@@ -495,6 +495,10 @@ def _parse_notation_scope(
             acc = 2
             has_explicit_acc = True
             core = core[1:]
+        # 升降号后可能还有左侧八度点（如 #.5、b.7），需再次剥离
+        while core.startswith("."):
+            left_dots += 1
+            core = core[1:]
         # 先剥离末尾的 - 和 _，再识别右侧八度点（支持 1.----- 与 1-----.）
         ext = sum(1 for c in core if c == "-")
         shrt = sum(1 for c in core if c == "_")
