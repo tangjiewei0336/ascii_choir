@@ -1,5 +1,26 @@
 # 简谱演奏
 
+## Star History
+
+<a href="https://star-history.com/#KoriIku/luxirty-search&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=KoriIku/luxirty-search&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=KoriIku/luxirty-search&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=KoriIku/luxirty-search&type=Date" />
+ </picture>
+</a>
+
+## 快速启动
+
+### 基本功能
+```bash
+pip install -r requirements.txt
+```
+
+### 附加功能
+
+#### 1. 人声合成
+
 如果需要使用VOCALOID功能，请在启动了docker的命令行运行：
 
 **Docker 启动**：
@@ -8,7 +29,7 @@ docker pull voicevox/voicevox_engine:cpu-latest
 docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 ```
 
-### 导出 MP3
+#### 2. 导出 MP3
 
 文件菜单中可以导出为MP3。
 
