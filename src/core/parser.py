@@ -110,7 +110,7 @@ class TTSEvent:
 
 
 # [cello][guitar] 等乐器标记：对当前行及后续篇章同一声部生效
-VALID_INSTRUMENT_TAGS = {"grand_piano", "piano", "violin", "cello", "trumpet", "clarinet", "oboe", "alto_sax", "tenor_sax", "bass", "guitar", "drums"}
+VALID_INSTRUMENT_TAGS = {"grand_piano", "piano", "violin", "cello", "trumpet", "clarinet", "oboe", "alto_sax", "tenor_sax", "bass", "guitar", "drums","guitar_electrical","bass_electrical"}
 
 
 def _strip_instrument_tag(line: str) -> tuple[str, Optional[str]]:
