@@ -2607,13 +2607,23 @@ class App:
         except tk.TclError:
             pass
 
-    def _get_prev_section_voice_prefixes(self, content_before_cursor: str) -> list[str] | None:
+    def _get_prev_section_voice_prefixes(self, content_before_cursor: str, content_full: str = "") -> list[str] | None:
         """从上一乐章提取各声部「从 & 到第一个 |」的头部。若不在新乐章开头或上一乐章无 & 行则返回 None。"""
         idx = content_before_cursor.rfind("\n\n")
         if idx == -1:
             return None
         remainder = content_before_cursor[idx + 2 :]
         if remainder.strip():
+            return None
+        # 若当前行（& 所在行）已有别的非空字符，不触发（避免在 "& |1 2 3|" 等行首再输入 & 时误触发）
+        cursor_pos = len(content_before_cursor)
+        line_start = content_before_cursor.rfind("\n") + 1
+        line_end = content_full.find("\n", cursor_pos) if content_full else cursor_pos
+        if line_end < 0:
+            line_end = len(content_full) if content_full else cursor_pos
+        current_line = (content_full or content_before_cursor)[line_start:line_end]
+        stripped = current_line.strip()
+        if stripped and stripped != "&":
             return None
         prev_section = content_before_cursor[:idx]
         last_sec_start = prev_section.rfind("\n\n")
@@ -2680,7 +2690,7 @@ class App:
         insert_idx = self.text.index("insert")
         cursor_pos = len(self.text.get("1.0", insert_idx))
         before = content[:cursor_pos]
-        prefixes = self._get_prev_section_voice_prefixes(before)
+        prefixes = self._get_prev_section_voice_prefixes(before, content)
         if not prefixes:
             return
         repl = "\n".join(prefixes)
