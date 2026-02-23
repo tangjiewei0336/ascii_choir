@@ -35,6 +35,7 @@ from src.ui.autocomplete import (
     AutocompletePopup,
 )
 from src.utils.bar_utils import get_bar_ranges_at_cursor, extract_single_bar_for_preview
+from src.utils.frozen_path import get_app_root
 
 
 def show_error_detail(parent: tk.Tk, title: str, message: str, traceback_str: str | None = None) -> None:
@@ -256,8 +257,8 @@ BRACKET_COLORS_LIGHT = ["#e8f4e8", "#e8e8f4", "#f4f4e8", "#f4e8f4", "#e8f4f4", "
 # 嵌套括号荧光色（深色模式）
 BRACKET_COLORS_DARK = ["#1e3d2e", "#1e2e3d", "#3d3d1e", "#3d1e3d", "#1e3d3d", "#3d2e1e"]
 
-# 应用根目录，用于预设工作区
-APP_ROOT = Path(__file__).resolve().parent.parent.parent
+# 应用根目录，用于预设工作区（打包后使用 sys._MEIPASS）
+APP_ROOT = get_app_root()
 WORKSPACES_DIR = APP_ROOT / "workspaces"
 EXAMPLE_WORKSPACE = WORKSPACES_DIR / "示例"
 

@@ -4,8 +4,10 @@
 import re
 from pathlib import Path
 
+from src.utils.frozen_path import get_app_root
+
 # 库扫描位置：workspaces/lib，\import 在 base_dir 未找到时会在此查找
-LIB_DIR = Path(__file__).resolve().parent.parent.parent / "workspaces" / "lib"
+LIB_DIR = get_app_root() / "workspaces" / "lib"
 
 
 def expand_imports(content: str, base_dir: Path | None) -> str:

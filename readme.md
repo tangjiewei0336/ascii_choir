@@ -52,6 +52,17 @@ brew install ffmpeg
 
 安装后可用 `ffmpeg -version` 验证。
 
+#### 3. 打包为可执行文件（免安装）
+
+使用 PyInstaller 打包为单文件，内含音色库与示例工作区：
+
+```bash
+pip install pyinstaller
+pyinstaller ascii_choir.spec
+```
+
+输出在 `dist/ASCII_Choir`。详见 [docs/PYINSTALLER_TUTORIAL.md](docs/PYINSTALLER_TUTORIAL.md)。
+
 ## 记号介绍
 
 #### 1. `[]` 表示奏法记号或简谱格式记号，目前支持如下记号（同组记号之间互斥）：

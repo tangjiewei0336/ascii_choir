@@ -1,9 +1,10 @@
 """
 音色加载模块：建立 MIDI 音符号到 WAV 文件的映射
 """
-import os
 import re
 from pathlib import Path
+
+from src.utils.frozen_path import get_app_root
 
 
 def load_sound_library(library_path: str) -> dict[int, str]:
@@ -32,5 +33,4 @@ def load_sound_library(library_path: str) -> dict[int, str]:
 
 def get_default_sound_path() -> str:
     """获取默认音色库路径（grand_piano）"""
-    base = Path(__file__).parent.parent.parent
-    return str(base / "sound_library" / "grand_piano")
+    return str(get_app_root() / "sound_library" / "grand_piano")

@@ -6,8 +6,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from src.utils.frozen_path import get_app_root
+
 # 音色库根目录
-SOUND_LIBRARY = Path(__file__).parent.parent.parent / "sound_library"
+SOUND_LIBRARY = get_app_root() / "sound_library"
 WAV_PATTERN = re.compile(r"German Concert D (\d{3}) 083\.wav", re.I)
 
 # 吉他四根弦及其音域（按弦从粗到细：a, d, g, b）
