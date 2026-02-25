@@ -25,11 +25,11 @@ jobs:
 
       - name: Copy resources to dist
         run: |
-          cp -r sound_library workspaces dist/
+          cp -r sound_library workspaces dist/ASCII_Choir/
 
       - name: Zip artifact
         run: |
-          ls -la dist/
+          ls -la dist/ASCII_Choir/
           cd dist && zip -r ASCII_Choir-macOS.zip . && cd ..
 
       - name: Upload macOS artifact
@@ -55,7 +55,7 @@ jobs:
 
       - name: Copy resources to dist
         run: |
-          Copy-Item -Recurse -Force sound_library, workspaces -Destination dist
+          Copy-Item -Recurse -Force sound_library, workspaces -Destination dist\ASCII_Choir
 
       - name: Zip artifact
         run: |

@@ -256,16 +256,24 @@ def show_vvm_download_dialog(parent: tk.Tk, filename: str) -> tuple[bool, str]:
 def _infer_vvm_from_synthesis_error(err_msg: str) -> str | None:
     """
     从合成错误信息推断需要的 VVM。
+    仅当明确为模型/风格缺失时返回；乐谱错误、网络错误等不匹配。
     TTS 失败（对话模型缺失）-> 0.vvm；歌唱失败（歌词模型缺失）-> s0.vvm。
-    返回 None 表示无法推断。
     """
     if not err_msg:
         return None
-    # TTS/对话：0.vvm
-    if "对话" in err_msg or "0.vvm" in err_msg:
+    # 排除非模型缺失类错误：乐谱无效、网络、连接等
+    excl = ("不正な", "invalid", "500", "Connection", "连接", "mora kana")
+    if any(x in err_msg for x in excl):
+        return None
+    # TTS/对话模型缺失：明确提及需下载对话模型
+    if "对话" in err_msg and ("0.vvm" in err_msg or "下载" in err_msg or "模型" in err_msg):
         return "0.vvm"
-    # 歌唱/歌词：s0.vvm
-    if "歌唱" in err_msg or "s0.vvm" in err_msg or "未找到歌唱" in err_msg or "スタイルが見つかりません" in err_msg:
+    if "0.vvm" in err_msg and ("下载" in err_msg or "需要" in err_msg):
+        return "0.vvm"
+    # 歌唱/歌词模型缺失：风格未找到、未找到歌唱角色、明确提及 s0.vvm
+    if "スタイルが見つかりません" in err_msg or "未找到歌唱" in err_msg:
+        return "s0.vvm"
+    if "s0.vvm" in err_msg and ("下载" in err_msg or "安装" in err_msg or "需要" in err_msg):
         return "s0.vvm"
     return None
 
@@ -273,11 +281,15 @@ def _infer_vvm_from_synthesis_error(err_msg: str) -> str | None:
 def should_show_vvm_download_for_error(err_msg: str, err_type: str = "") -> bool:
     """
     判断合成错误是否应弹出 VVM 下载提示。
-    TTS 或歌词模型缺失时返回 True。
+    仅当明确为 TTS 或歌词模型缺失时返回 True，其他错误（乐谱无效、网络等）不提示下载。
     """
     if not err_msg and not err_type:
         return False
-    if "StyleNotFound" in err_type or "スタイルが見つかりません" in (err_msg or ""):
+    # 异常类型明确为 StyleNotFound
+    if "StyleNotFound" in err_type:
+        return True
+    # 错误信息明确为风格/模型未找到
+    if "スタイルが見つかりません" in (err_msg or ""):
         return True
     return _infer_vvm_from_synthesis_error(err_msg or "") is not None
 

@@ -11,13 +11,15 @@ from typing import Optional
 
 
 class _FilteredStderr:
-    """过滤 CharacterVersion 版本差异警告，其余 stderr 正常输出"""
+    """过滤 CharacterVersion 版本差异警告，其余 stderr 正常输出。PyInstaller 下 sys.stderr 可能为 None。"""
 
     def __init__(self, original):
         self._original = original
         self._buf = ""
 
     def write(self, s: str) -> None:
+        if self._original is None:
+            return
         self._buf += s
         if "\n" in self._buf or "\r" in self._buf:
             for line in self._buf.splitlines(keepends=True):
@@ -27,6 +29,9 @@ class _FilteredStderr:
             self._buf = ""
 
     def flush(self) -> None:
+        if self._original is None:
+            self._buf = ""
+            return
         if self._buf and "different `version`" not in self._buf:
             self._original.write(self._buf)
         self._buf = ""
@@ -38,8 +43,12 @@ class _FilteredStderr:
 
 @contextlib.contextmanager
 def _suppress_version_warnings():
-    """抑制 voicevox_core 加载 VVM 时的 CharacterVersion 版本差异警告（0.16.1 vs 0.16.0）"""
+    """抑制 voicevox_core 加载 VVM 时的 CharacterVersion 版本差异警告（0.16.1 vs 0.16.0）。
+    PyInstaller 下 sys.stderr 可能为 None，需跳过替换。"""
     orig = sys.stderr
+    if orig is None:
+        yield
+        return
     filtered = _FilteredStderr(orig)
     sys.stderr = filtered
     try:
@@ -127,25 +136,32 @@ def _ensure_synthesizer(vvm_path: Optional[Path] = None) -> "Synthesizer":
     if _synthesizer is None:
         _synthesizer = _run_async(_init_synthesizer())
 
-    if vvm_path and vvm_path.exists():
-        vvm_key = str(vvm_path)
-        if vvm_key not in _loaded_vvms:
+    def _load_vvm(path: Path) -> None:
+        key = str(path)
+        if key in _loaded_vvms:
+            return
+        try:
             from voicevox_core.asyncio import VoiceModelFile
             with _suppress_version_warnings():
-                model = _run_async(VoiceModelFile.open(str(vvm_path)))
+                model = _run_async(VoiceModelFile.open(str(path)))
                 _run_async(_synthesizer.load_voice_model(model))
-            _loaded_vvms.add(vvm_key)
+        except Exception as e:
+            if "ModelAlreadyLoaded" in type(e).__name__ or "既に読み込まれています" in str(e):
+                # 模型已加载，视为成功
+                pass
+            else:
+                raise
+        _loaded_vvms.add(key)
+
+    if vvm_path and vvm_path.exists():
+        _load_vvm(vvm_path)
     else:
         # 确保 s0.vvm 与 0.vvm 均已加载（若存在），使 TTS 与歌唱均可用
         vvm_dir = get_vvm_dir()
         for vvm in ["s0.vvm", "0.vvm"]:
             p = vvm_dir / vvm
-            if p.exists() and str(p) not in _loaded_vvms:
-                from voicevox_core.asyncio import VoiceModelFile
-                with _suppress_version_warnings():
-                    model = _run_async(VoiceModelFile.open(str(p)))
-                    _run_async(_synthesizer.load_voice_model(model))
-                _loaded_vvms.add(str(p))
+            if p.exists():
+                _load_vvm(p)
 
     return _synthesizer
 

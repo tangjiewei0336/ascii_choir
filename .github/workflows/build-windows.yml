@@ -27,6 +27,9 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller ascii_choir.spec
 
+      - name: Copy resources to dist
+        run: bash scripts/copy_resources_to_dist.sh
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

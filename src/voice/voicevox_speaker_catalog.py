@@ -3,9 +3,17 @@
 用于本地库模式下显示全部音色，未下载的置灰并提示。
 """
 import json
+import sys
 from pathlib import Path
 
 from src.voice.voicevox_model_manager import is_vvm_installed
+
+
+def _get_bundled_speakers_path() -> Path:
+    """打包后 __file__ 可能不可靠，优先用 sys._MEIPASS"""
+    if getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None):
+        return Path(sys._MEIPASS) / "src" / "voice" / "speakers_full_bundled.json"
+    return Path(__file__).parent / "speakers_full_bundled.json"
 
 # speaker_uuid -> 角色名（用于音色面板显示）
 SPEAKER_UUID_TO_NAME: dict[str, str] = {
@@ -111,7 +119,7 @@ def is_speaker_available(speaker_uuid: str, for_talk: bool = True) -> bool:
     return vvm is not None and is_vvm_installed(vvm)
 
 
-_BUNDLED_SPEAKERS_PATH = Path(__file__).parent / "speakers_full_bundled.json"
+_BUNDLED_SPEAKERS_PATH = _get_bundled_speakers_path()
 _bundled_speakers_cache: list[dict] | None = None
 
 

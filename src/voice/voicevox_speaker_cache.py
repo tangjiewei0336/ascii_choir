@@ -2,10 +2,19 @@
 音色头像：从内嵌的 speaker_info_bundled.json 读取，供本地库模式使用。
 """
 import json
+import sys
 from pathlib import Path
 from typing import Optional
 
-_BUNDLED_PATH = Path(__file__).parent / "speaker_info_bundled.json"
+
+def _get_bundled_path() -> Path:
+    """打包后 __file__ 可能不可靠，优先用 sys._MEIPASS"""
+    if getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None):
+        return Path(sys._MEIPASS) / "src" / "voice" / "speaker_info_bundled.json"
+    return Path(__file__).parent / "speaker_info_bundled.json"
+
+
+_BUNDLED_PATH = _get_bundled_path()
 _cache: dict[str, dict] | None = None
 
 
