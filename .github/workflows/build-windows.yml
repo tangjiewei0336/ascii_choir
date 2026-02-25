@@ -1,0 +1,37 @@
+# 在 Windows 上自动打包 ASCII Choir
+# 推送后到 Actions 页面下载 dist 产物
+name: Build Windows
+
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller ascii_choir.spec
+
+      - name: Copy resources to dist
+        run: bash scripts/copy_resources_to_dist.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ASCII_Choir-Windows
+          path: dist/

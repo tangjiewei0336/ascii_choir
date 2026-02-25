@@ -1,7 +1,14 @@
-/__pycache__
+**/__pycache__
+venv/
+.venv/
 .tts_tmp.mp3
+.voicevox_preview.wav
 workspaces/**/.ascii_choir_breakpoints.json
 **/.DS_Store
 .DS_Store
 sound_library/*.py
 sound_library/*.sh
+
+# PyInstaller
+build/
+dist/

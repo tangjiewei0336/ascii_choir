@@ -1,0 +1,96 @@
+# 推送 v* 标签时自动构建 macOS + Windows 并发布 GitHub Release
+# 用法: git tag v1.0.0 && git push origin v1.0.0
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install and build
+        run: |
+          pip install -r requirements.txt "pyinstaller>=6.14.0"
+          pyinstaller ascii_choir.spec
+
+      - name: Copy resources to dist
+        run: |
+          cp -r sound_library workspaces dist/ASCII_Choir/
+
+      - name: Zip artifact
+        run: |
+          ls -la dist/ASCII_Choir/
+          cd dist && zip -r ASCII_Choir-macOS.zip . && cd ..
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ASCII_Choir-macOS
+          path: dist/ASCII_Choir-macOS.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install and build
+        run: |
+          pip install -r requirements.txt "pyinstaller>=6.14.0"
+          pyinstaller ascii_choir.spec
+
+      - name: Copy resources to dist
+        run: |
+          Copy-Item -Recurse -Force sound_library, workspaces -Destination dist\ASCII_Choir
+
+      - name: Zip artifact
+        run: |
+          Compress-Archive -Path dist\* -DestinationPath dist\ASCII_Choir-Windows.zip
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ASCII_Choir-Windows
+          path: dist/ASCII_Choir-Windows.zip
+
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS
+        uses: actions/download-artifact@v4
+        with:
+          name: ASCII_Choir-macOS
+
+      - name: Download Windows
+        uses: actions/download-artifact@v4
+        with:
+          name: ASCII_Choir-Windows
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ASCII_Choir-macOS.zip
+            ASCII_Choir-Windows.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

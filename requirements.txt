@@ -1,9 +1,17 @@
 numpy>=1.20.0
 Pillow>=9.0.0
+# VOICEVOX 本地合成
+voicevox_core @ https://github.com/VOICEVOX/voicevox_core/releases/download/0.16.4/voicevox_core-0.16.4-cp310-abi3-win_amd64.whl ; sys_platform == 'win32' and platform_machine == 'AMD64'
+voicevox_core @ https://github.com/VOICEVOX/voicevox_core/releases/download/0.16.4/voicevox_core-0.16.4-cp310-abi3-win32.whl ; sys_platform == 'win32' and platform_machine == 'x86'
+voicevox_core @ https://github.com/VOICEVOX/voicevox_core/releases/download/0.16.4/voicevox_core-0.16.4-cp310-abi3-macosx_11_0_arm64.whl ; sys_platform == 'darwin' and platform_machine == 'arm64'
+voicevox_core @ https://github.com/VOICEVOX/voicevox_core/releases/download/0.16.4/voicevox_core-0.16.4-cp310-abi3-macosx_10_12_x86_64.whl ; sys_platform == 'darwin' and platform_machine == 'x86_64'
+voicevox_core @ https://github.com/VOICEVOX/voicevox_core/releases/download/0.16.4/voicevox_core-0.16.4-cp310-abi3-manylinux_2_34_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'
+voicevox_core @ https://github.com/VOICEVOX/voicevox_core/releases/download/0.16.4/voicevox_core-0.16.4-cp310-abi3-manylinux_2_34_aarch64.whl ; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64')
 sounddevice>=0.4.6
 soundfile>=0.12.0
 edge-tts>=6.1.0
 # TTS 音频解码：audioread（macOS 无需 ffmpeg）或 pydub（需 ffmpeg）
 audioread>=3.0.0
 pydub>=0.25.0
-audioop-lts
+# Python 3.13+ 需要，3.12 及以下使用标准库 audioop
+audioop-lts; python_version >= '3.13'

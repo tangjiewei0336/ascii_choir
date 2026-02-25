@@ -1,5 +1,26 @@
 # 简谱演奏
 
+## Star History
+
+<a href="https://star-history.com/#tangjiewei0336/ascii_choir&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=tangjiewei0336/ascii_choir&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=tangjiewei0336/ascii_choir&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=tangjiewei0336/ascii_choir&type=Date" />
+ </picture>
+</a>
+
+## 快速启动
+
+### 基本功能
+```bash
+pip install -r requirements.txt
+```
+
+### 附加功能
+
+#### 1. 人声合成
+
 如果需要使用VOCALOID功能，请在启动了docker的命令行运行：
 
 **Docker 启动**：
@@ -7,6 +28,40 @@
 docker pull voicevox/voicevox_engine:cpu-latest
 docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 ```
+
+#### 2. 导出 MP3
+
+文件菜单中可以导出为MP3。
+
+导出为 MP3 需要安装 **ffmpeg**。若未安装，程序会自动回退为 WAV 格式。
+
+**macOS（Homebrew）**：
+```bash
+brew install ffmpeg
+```
+
+**Windows**：
+- winget：`winget install ffmpeg`
+- Chocolatey：`choco install ffmpeg`
+- 或从 [ffmpeg.org](https://ffmpeg.org/download.html) 下载，将 `bin` 目录加入 PATH
+
+**Linux**：
+- Ubuntu/Debian：`sudo apt install ffmpeg`
+- Fedora：`sudo dnf install ffmpeg`
+- Arch：`sudo pacman -S ffmpeg`
+
+安装后可用 `ffmpeg -version` 验证。
+
+#### 3. 打包为可执行文件（免安装）
+
+使用 PyInstaller 打包为单文件，内含音色库与示例工作区：
+
+```bash
+pip install pyinstaller
+pyinstaller ascii_choir.spec
+```
+
+输出在 `dist/ASCII_Choir`。详见 [docs/PYINSTALLER_TUTORIAL.md](docs/PYINSTALLER_TUTORIAL.md)。
 
 ## 记号介绍
 
@@ -29,10 +84,11 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 4. 升降号技能调整
 - [deviation explicit on] 启用还原号。
 - [deviation explicit off] 关闭还原号。此时升降号只作用于单音，不持续。
-5. 偏移记号`[#va]`
+5. 八度记号
 - [8va] 高八度（ottava alta），将括号内音符整体升高一个八度
 - [8vb] 低八度（ottava bassa），将括号内音符整体降低一个八度
 - [15va] 高两个八度（quindicesima），将括号内音符整体升高两个八度
+- [15vb] 低两个八度，将括号内音符整体降低两个八度
 6. 琶音装饰`[a]` / `[arpeggio]`
 - 快速连续弹奏多个音符，从最低音开始，同时终止。无括号时只作用于右边第一个音（单音或和弦）；有括号 `[a](...)` 则作用于括号内所有音。
 
@@ -41,9 +97,27 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 | [a]1/3/5 2 3 |        # 和弦 1/3/5 琶音，2、3 正常
 | [arpeggio](1 2 3 4) | # 括号内四个音依次琶音
 ```
-7. 和声记号
+7. 滑音 `[gliss]`
+- `[gliss](起音 止音)` 从起音滑到止音。默认占 1 拍、两个音符。可用 `|` 跨小节或 `_` 缩短时值。
+
+有效的例子：
+```text
+| [gliss](1 5) |        # 从 1 滑到 5，1 拍
+| [gliss](1_ 5) |       # 同上，时值由内容决定
+| [gliss](1 5)_ |       # 0.5 拍滑音
+```
+8. 颤音 `[tr]` / `[tr+]` / `[tr-]`
+- `[tr](主音)` 或 `[tr] 主音 后续内容`：主音与上方大二度快速交替。`[tr+]` 上颤音；`[tr-]` 下颤音（主音与下方大二度交替）。可用 `-` 和 `_` 调整时值。
+
+有效的例子：
+```text
+| [tr](1) |             # 1 与上方 2 交替，1 拍
+| [tr] 1 - (.5 1 2 3)_ | # 无括号时，后续内容直到 | 为颤音范围
+| [tr-](1) |            # 1 与下方 7 交替
+```
+9. 和声记号
 - [+3][-3][+5][-5] 按音名往下/上数：+3 往上三度（如 E→G），-3 往下三度（如 E→C、G→E）；+5/-5 同理。**不可用于含升降号（# b ^）的音符**。
-8. 反复与结束记号
+10. 反复与结束记号
 - [dc] Da Capo：从此处跳回开头，再演奏至 [fine] 结束。
 - [fine]：在此处结束演奏。
 
@@ -119,7 +193,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 |0 - 0 1_ 2_ | 3 0~ |
 ```
 
-#### 10. `~`号写在音符的前面表示连音线。连音线可连到上一个小节的最后一音。
+#### 10. `~`号写在音符的前面表示连音线。连音线可连到上一个小节的最后一音。**输入 `~` 时自动重复上一音符**（如 `1 2 3` 后输入 `~` 得到 `1 2 3 ~3`）。
 有效的例子：
 ```text
 |0 - 0 (1 2)_ | 3 (4 5)_ 0_ 5 5_ | ~5 3 5 1. |
@@ -181,7 +255,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 
 ### 拍号
 拍号紧接在调性之后。
-- `\beat{分子/分母}` 表示拍号，如 4/4、3/4、6/8
+- `\beat{分子/分母}` 表示拍号，如 4/4、3/4、6/8。**分母定义 1 拍**（如 4/4 中四分音符=1拍），**一小节=分子拍**，便于计算。
 - `\beat{c}` 表示 common time（4/4），`\beat{cut}` 表示 cut time（2/2）
 
 有效的例子：
@@ -203,6 +277,18 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 ### 禁用小节号
 由于这是一个创作类软件，很多时候小节号会给记谱带来额外负担。
 使用\no_bar_check即可禁用小节号，同时beat也无效。
+
+### 全局混响
+`\reverb{N}` 对整曲施加混响，N 为 0–100，0 为无混响，100 为最大混响强度。作用于所有乐器。
+
+```text
+\tonality{0}
+\beat{4/4}
+\bpm{120}
+\reverb{30}
+
+|1 2 3 4|5 6 7 1|
+```
 
 ### TTS 语音（篇章间）
 `\tts{文本}`、`\tts{文本}{语言}` 或 `\tts{文本}{语言}{voice_id}` 用于在篇章之间插入语音朗读，**仅可插入在篇章之间**（双换行分隔的块）。
@@ -234,6 +320,7 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 - `\lyrics{...}{part_index}`：**声部索引**，指定歌词追加到第几个声部（0 起）。多声部时，0=第一行旋律，1=第二行旋律，以此类推
 - `\lyrics{...}{part_index}{voice_id}`：voice_id 为 VOICEVOX style_id（可选）。**有 voice_id 时播放会用 VOICEVOX 歌唱合成歌声**，替代 WAV 音色
 - `\lyrics{...}{part_index}{voice_id}{melody}`：**melody** 为和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
+- `\lyrics{...}{part_index}{voice_id}{melody}{volume}`：**volume** 为歌声音量 0–150，默认 60，>100 可做提升
 - 行内歌词：`1(啊) 2(一)` 在音符后加括号（未测试！！）
 
 ```text
@@ -244,11 +331,12 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 |1 2 3 4|5 6 7 1|
 ```
 
-多声部示例（`\lyrics{音节}{part_index}{voice_id}{melody}` 四个参数依次为）：
+多声部示例（`\lyrics{音节}{part_index}{voice_id}{melody}{volume}` 五个参数依次为）：
 - **音节**：斜杠分隔的字，与音符一一对齐
 - **part_index**：声部索引（0 起），0=第一行旋律，1=第二行旋律
 - **voice_id**：VOICEVOX 的 style_id，有则用歌唱合成；可省略
 - **melody**：和声时旋律来源，`0`=第一音旋律，`1`=第二音旋律
+- **volume**：歌声音量 0–150，默认 60，>100 可做提升
 
 ```text
 \tonality{0}
@@ -266,6 +354,50 @@ docker run --rm -p '127.0.0.1:50021:50021' voicevox/voicevox_engine:cpu-latest
 \lyrics{高/高/音/音/唱/唱}{0}{5}{1}   // melody=1：取各和弦第二音 3、4、5、6、7、1.
 & |1/3 2/4 3/5|4/6 5/7 6/1.|
 ```
+
+### 音色与乐器
+行首 `[cello]`、`[guitar]`、`[drums]` 等指定该声部乐器。鼓声部 `[drums]` 使用 GM 打击乐映射，鼓声库需先运行 `sound_library/build_drums.py` 从原始素材生成。
+
+#### 电吉他失真度
+`[distortion:N]` 或 `[drive:N]`（N 为 0–100）控制电吉他/电贝司的合成失真度。0 为原声，100 为最大失真。仅对 `[guitar_electric]`、`[bass_electric]` 生效。
+
+```text
+& [guitar_electric][distortion:50]|1 2 3 4|   # 50% 失真
+& [guitar_electric][drive:80]|5 6 7 1|        # 80% 失真
+```
+
+#### GM 鼓表（[drums] 声部 MIDI 映射）
+
+鼓声部使用与旋律一致的简谱格式（`.1`、`.2`、`..#4` 等），便于对齐。C 大调（`\tonality{0}`）下示例：
+
+| MIDI | 名称 | 简谱（tonality 0） |
+|------|------|-------------------|
+| 28 | Slap（鼓棒） | ...3 |
+| 31 | Sticks（鼓棒） | ...5 |
+| 35 | Acoustic Bass Drum | ...7 |
+| 36 | Bass Drum 1 | ..1 |
+| 37 | Side Stick（鼓棒敲边） | ..#1 |
+| 38 | Acoustic Snare | ..2 |
+| 39 | Hand Clap | ..#2 |
+| 40 | Electric Snare | ..3 |
+| 41 | Low Floor Tom | ..4 |
+| 42 | Closed Hi-Hat | ..#4 |
+| 43 | High Floor Tom | ..5 |
+| 44 | Pedal Hi-Hat | ..#5 |
+| 45 | Low Tom | ..6 |
+| 46 | Open Hi-Hat | ..#6 |
+| 47 | Low-Mid Tom | ..7 |
+| 48 | Hi-Mid Tom | .1 |
+| 49 | Crash Cymbal 1 | .#1 |
+| 50 | High Tom | .2 |
+| 51 | Ride Cymbal 1 | .#2 |
+| 52 | Chinese Cymbal | .3 |
+| 53 | Ride Bell | .4 |
+| 55 | Splash Cymbal | .5 |
+| 57 | Crash Cymbal 2 | .6 |
+| 59 | Ride Cymbal 2 | .7 |
+
+**说明**：鼓音使用简谱数字（含 `.`、`..`、`#`、`b`），与旋律记谱一致，便于多声部对齐。鼓声部**不受 `\tonality` 控制**，始终按 C 大调映射（如 `.1`=C、`.6`=A）。
 
 ### 导入文件（\import）
 `\import{文件名}` 在播放前会被自动展开为对应文件的内容，用于模块化组织简谱。
@@ -292,20 +424,28 @@ TTS 菜单 → **VOICEVOX 音色选择** 可打开音色对话框：
 - 左侧：扁平音色列表，**点击即试听**
 - 右侧：选中音色的全身照与利用規約
 - **复制 TTS 命令**：将 `\tts{こんにちは}{ja}{style_id}` 复制到剪贴板
-- **复制 歌词命令**：将 `\lyrics{字/字}{0}{style_id}{0}` 复制到剪贴板
+- **复制 歌词命令**：将 `\lyrics{字/字}{0}{style_id}{0}` 复制到剪贴板（可追加 `{60}` 设置音量）
 - **清唱生成**：用当前选中音色将当前编辑器中的简谱合成为歌声（无 WAV 伴奏），直接播放
 
 使用前需启动 voicevox_engine（默认 http://127.0.0.1:50021）。
 
-**歌词歌声合成**：当 `\lyrics{...}{part}{voice_id}{melody}` 中指定了 voice_id 时，播放该篇章会用 VOICEVOX 歌唱 API 合成歌声。**注意**：歌唱仅支持 `/singers` 中的角色（如波音リツ），若所选音色不支持歌唱，程序会自动使用可用的歌唱角色。
+**歌词歌声合成**：当 `\lyrics{...}{part}{voice_id}{melody}{volume}` 中指定了 voice_id 时，播放该篇章会用 VOICEVOX 歌唱 API 合成歌声。volume 可选，默认 60。**注意**：歌唱仅支持 `/singers` 中的角色（如波音リツ），若所选音色不支持歌唱，程序会自动使用可用的歌唱角色。
 
 ## 编辑器功能
 
 ### 导入插入
 从左侧工作区文件列表**拖拽**文件到输入框，可在落点插入 `\import{文件名}`，播放前会自动展开。
 
-### 自动对齐
-按下ctrl+F，系统自动把同时演奏的多个小节号对齐。
+### 查找与替换
+- **Ctrl+F** / **⌘F**：打开查找对话框，支持查找下一个/上一个、区分大小写
+- **Ctrl+H** / **⌘⌥F**（Mac）：打开替换对话框，支持替换、全部替换
+- 若有选中文本（单行），会预填到查找框
+
+### 格式化
+- **Ctrl+Shift+F** / **⌘⇧F**：自动对齐同时演奏的多个小节号。勾选「行超宽时自动换新篇章」时，超宽行会自动换新篇章。
+
+### 工作区记忆
+程序会记住上次打开的工作区及每个工作区的最后打开文件，下次启动时自动恢复。
 
 ### 括号捕获组高亮
 自动使用淡色荧光高亮括号作用域。
