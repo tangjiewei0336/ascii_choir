@@ -27,15 +27,28 @@ from src.core.preprocessor import expand_imports
 from src.utils.renderer import render_to_image, render_to_pil
 from src.core.validator import validate, VOICEVOX_UNREACHABLE_MSG
 from src.utils.breakpoints import load_breakpoints, save_breakpoints, rename_breakpoints
+from src.utils.accompaniment import rename_accompaniment
 from src.voice.voicevox_client import VOICEVOX_BASE
 from src.ui.progress_window import ProgressWindow
 from src.ui.autocomplete import (
     get_backslash_suggestions,
     get_bracket_suggestions,
-    AutocompletePopup,
+    get_chord_completion_context,
+    get_chord_suggestions,
+    ChordAutocompletePopup,
 )
 from src.utils.bar_utils import get_bar_ranges_at_cursor, extract_single_bar_for_preview
 from src.utils.frozen_path import get_app_root
+
+
+def _extract_defines_map(text: str) -> dict[str, str]:
+    """提取 \\define{key}{value}，返回 {key: value}。同 key 后者覆盖。"""
+    result: dict[str, str] = {}
+    for m in re.finditer(r"\\define\{([^{}]+)\}\{([^{}]*)\}\s*", text, re.I):
+        key, val = m.group(1).strip(), m.group(2)
+        if key:
+            result[key] = val
+    return result
 
 
 def show_error_detail(parent: tk.Tk, title: str, message: str, traceback_str: str | None = None) -> None:
@@ -378,7 +391,6 @@ class App:
         file_menu.add_command(label="导出为 MP3...", command=self._on_export_mp3)
         file_menu.add_separator()
         file_menu.add_command(label="打开工作区...", command=self._on_open_workspace)
-        file_menu.add_command(label="打开示例工作区", command=self._on_open_example_workspace)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self._on_quit)
         
@@ -963,6 +975,27 @@ class App:
             import traceback
             show_error_detail(self.root, "错误", f"无法加载乐器面板: {e}", traceback.format_exc())
 
+    def _on_accompaniment_panel(self):
+        """打开伴奏辅助插入面板"""
+        try:
+            from src.ui.accompaniment_panel import show_accompaniment_panel
+            base_dir = (
+                self.workspace_root
+                if self.workspace_root and self.workspace_root.is_dir()
+                else (self.current_file_path.parent if self.current_file_path else None)
+            )
+            show_accompaniment_panel(
+                self.root,
+                workspace_root=self.workspace_root,
+                current_filename=self.current_file_path.name if self.current_file_path else None,
+                base_dir=base_dir,
+                get_content=lambda: self.text.get(1.0, tk.END),
+                on_insert=lambda s: self.text.insert(tk.INSERT, s),
+            )
+        except ImportError as e:
+            import traceback
+            show_error_detail(self.root, "错误", f"无法加载伴奏辅助: {e}", traceback.format_exc())
+
     def _on_help(self):
         """打开用法说明：左侧条目列表，右侧详细中文解释"""
         dlg = tk.Toplevel(self.root)
@@ -1242,11 +1275,6 @@ class App:
         if path:
             self._set_workspace(Path(path))
     
-    def _on_open_example_workspace(self):
-        """打开预设的示例工作区"""
-        _ensure_example_workspace()
-        self._set_workspace(EXAMPLE_WORKSPACE)
-    
     def _load_file(self, path: Path):
         try:
             content = path.read_text(encoding="utf-8")
@@ -1469,6 +1497,7 @@ class App:
             base = self._get_breakpoint_base_dir()
             if base:
                 rename_breakpoints(base, old_path.name, new_path.name)
+                rename_accompaniment(base, old_path.name, new_path.name)
             if self.current_file_path == old_path:
                 self.current_file_path = new_path
                 self._breakpoints = set(load_breakpoints(base, new_path.name)) if base else set()
@@ -1592,8 +1621,7 @@ class App:
         self.btn_voicevox = ttk.Button(toolbar, text="VOICEVOX 音色", command=self._on_voicevox_voices)
         self.btn_voicevox.pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(toolbar, text="乐器面板", command=self._on_instrument_panel).pack(side=tk.LEFT, padx=(0, 5))
-        
-        ttk.Button(toolbar, text="打开示例工作区", command=self._on_open_example_workspace).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(toolbar, text="伴奏辅助", command=self._on_accompaniment_panel).pack(side=tk.LEFT, padx=(0, 5))
         
         self.auto_wrap_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -1825,7 +1853,7 @@ class App:
         self._highlight_timer = None
         self._diag_timer = None  # 诊断单独防抖，避免 validate() 在每次高亮时执行
         self._auto_save_timer = None
-        self._autocomplete_popup: AutocompletePopup | None = None
+        self._autocomplete_popup: ChordAutocompletePopup | None = None
         self._autocomplete_timer = None
         self._command_held = False
         self._bar_mouse_pos: tuple[int, int] | None = None
@@ -3043,70 +3071,158 @@ class App:
                 trigger_pos = i
                 break
 
-        if trigger_char is None or trigger_pos < 0:
-            if self._autocomplete_popup:
-                self._autocomplete_popup.close()
+        if trigger_char is not None and trigger_pos >= 0:
+            # 已有 \ 或 [ 触发，使用原有补全（仅当与光标同「行内」时，否则尝试和弦补全）
+            prefix = before[trigger_pos + 1 :]
+            if "\n" in prefix or "|" in prefix:
+                # 换行或小节线后的输入，不算 \ 或 [ 触发，fall through 到和弦补全
+                trigger_char = None
+            elif trigger_char == "\\" and "{" in prefix:
+                if self._autocomplete_popup:
+                    self._autocomplete_popup.close()
+                    self._autocomplete_popup = None
+                return
+            elif trigger_char == "[" and "]" in prefix:
+                # [Cmaj] 后输入字母应触发和弦补全，而非 [ 补全，fall through
+                trigger_char = None
+
+        if trigger_char is not None and trigger_pos >= 0:
+            # \ 或 [ 触发有效，使用原有补全
+            prefix = before[trigger_pos + 1 :]
+            base_dir = (
+                self.workspace_root
+                if self.workspace_root and self.workspace_root.is_dir()
+                else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+            )
+            if trigger_char == "\\":
+                suggestions = get_backslash_suggestions(prefix)
+            else:
+                suggestions = get_bracket_suggestions(
+                    prefix, content, base_dir,
+                    current_filename=self.current_file_path.name if self.current_file_path else None,
+                )
+            if not suggestions:
+                if self._autocomplete_popup:
+                    self._autocomplete_popup.close()
+                    self._autocomplete_popup = None
+                return
+            def on_select(insert_val: str, cursor_offset: int | None = None):
+                start_idx = f"1.0+{trigger_pos}c"
+                end_idx = "insert"
+                self.text.delete(start_idx, end_idx)
+                self.text.insert(start_idx, insert_val)
+                if cursor_offset is not None and cursor_offset > 0:
+                    self.text.mark_set("insert", f"{start_idx}+{len(insert_val) - cursor_offset}c")
+                if self._autocomplete_popup:
+                    self._autocomplete_popup.close()
+                    self._autocomplete_popup = None
+
+            def on_close():
                 self._autocomplete_popup = None
+
+            if self._autocomplete_popup:
+                self._autocomplete_popup.update_suggestions(suggestions, prefix)
+            else:
+                self._autocomplete_popup = ChordAutocompletePopup(
+                    self.root,
+                    self.text,
+                    suggestions,
+                    trigger_pos,
+                    prefix,
+                    on_select,
+                    on_close=on_close,
+                )
             return
 
-        prefix = before[trigger_pos + 1 :]
-        if trigger_char == "\\" and "{" in prefix:
-            if self._autocomplete_popup:
-                self._autocomplete_popup.close()
-                self._autocomplete_popup = None
-            return
-        if trigger_char == "[" and "]" in prefix:
-            if self._autocomplete_popup:
-                self._autocomplete_popup.close()
-                self._autocomplete_popup = None
-            return
+        # 和弦补全：输入字母时触发（可插入 [chord] 或 \define{chord}{展开内容}）
+        chord_ctx = get_chord_completion_context(content, cursor_pos)
+        if chord_ctx:
+            trigger_pos, prefix, inside_brackets = chord_ctx
+            tonality = get_tonality_offset(content)
+            base_dir = (
+                self.workspace_root
+                if self.workspace_root and self.workspace_root.is_dir()
+                else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+            )
+            suggestions = get_chord_suggestions(
+                prefix,
+                tonality_offset=tonality,
+                workspace_root=self.workspace_root,
+                current_filename=self.current_file_path.name if self.current_file_path else None,
+                base_dir=base_dir,
+                insert_as_define=not inside_brackets,  # 在 [ 内只插和弦，否则插 define + [chord]
+            )
+            if suggestions:
+                def on_select(insert_val: str, cursor_offset: int | None = None):
+                    # 使用当前光标位置作为删除结束，避免用户继续输入后 len(prefix) 过时导致多余字符
+                    cursor_pos_now = len(self.text.get("1.0", "insert"))
+                    if insert_val.startswith("\\define"):
+                        # define 插入到文件头部；若已存在同名但不同内容，用 chord_1、chord_2 等
+                        m = re.match(r"\\define\{([^{}]+)\}\{([^{}]*)\}", insert_val)
+                        chord = m.group(1) if m else ""
+                        new_content = m.group(2) if m and m.lastindex >= 2 else ""
+                        content_before = self.text.get("1.0", tk.END)
+                        existing = _extract_defines_map(content_before)
+                        final_chord = chord
+                        if chord in existing:
+                            if existing[chord] == new_content:
+                                pass  # 完全相同，不插 define
+                            else:
+                                for k in range(1, 100):
+                                    cand = f"{chord}_{k}"
+                                    if cand not in existing or existing[cand] == new_content:
+                                        final_chord = cand
+                                        break
+                        define_line = f"\\define{{{final_chord}}}{{{new_content}}}\n"
+                        if f"\\define{{{final_chord}}}{{{new_content}}}" not in content_before:
+                            self.text.insert("1.0", define_line)
+                            head_len = len(define_line)
+                        else:
+                            head_len = 0
+                        bracket_val = f"[{final_chord}]"
+                        start_idx = f"1.0+{trigger_pos + head_len}c"
+                        end_idx = f"1.0+{cursor_pos_now + head_len}c"
+                        self.text.delete(start_idx, end_idx)
+                        self.text.insert(start_idx, bracket_val)
+                        self.text.mark_set("insert", f"{start_idx}+{len(bracket_val)}c")
+                    elif inside_brackets and insert_val.startswith("[") and insert_val.endswith("]"):
+                        val = insert_val[1:-1]
+                        start_idx = f"1.0+{trigger_pos}c"
+                        end_idx = "insert"
+                        self.text.delete(start_idx, end_idx)
+                        self.text.insert(start_idx, val)
+                    else:
+                        val = insert_val
+                        start_idx = f"1.0+{trigger_pos}c"
+                        end_idx = "insert"
+                        self.text.delete(start_idx, end_idx)
+                        self.text.insert(start_idx, val)
+                        if cursor_offset is not None and cursor_offset > 0:
+                            self.text.mark_set("insert", f"{start_idx}+{len(val) - cursor_offset}c")
+                    if self._autocomplete_popup:
+                        self._autocomplete_popup.close()
+                        self._autocomplete_popup = None
 
-        base_dir = (
-            self.workspace_root
-            if self.workspace_root and self.workspace_root.is_dir()
-            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
-        )
+                def on_close():
+                    self._autocomplete_popup = None
 
-        if trigger_char == "\\":
-            suggestions = get_backslash_suggestions(prefix)
-        else:
-            suggestions = get_bracket_suggestions(prefix, content, base_dir)
-
-        if not suggestions:
-            if self._autocomplete_popup:
-                self._autocomplete_popup.close()
-                self._autocomplete_popup = None
-            return
-
-        def on_select(insert_val: str, cursor_offset: int | None = None):
-            start_idx = f"1.0+{trigger_pos}c"
-            end_idx = "insert"
-            self.text.delete(start_idx, end_idx)
-            self.text.insert(start_idx, insert_val)
-            if cursor_offset is not None and cursor_offset > 0:
-                self.text.mark_set("insert", f"{start_idx}+{len(insert_val) - cursor_offset}c")
-            if self._autocomplete_popup:
-                self._autocomplete_popup.close()
-                self._autocomplete_popup = None
-
-        def on_close():
-            self._autocomplete_popup = None
+                if self._autocomplete_popup:
+                    self._autocomplete_popup.update_suggestions(suggestions, prefix)
+                else:
+                    self._autocomplete_popup = ChordAutocompletePopup(
+                        self.root,
+                        self.text,
+                        suggestions,
+                        trigger_pos,
+                        prefix,
+                        on_select,
+                        on_close=on_close,
+                    )
+                return
 
         if self._autocomplete_popup:
-            self._autocomplete_popup.update_suggestions(suggestions)
-            self._autocomplete_popup.prefix = prefix
-            self._autocomplete_popup.on_select = on_select
-            self._autocomplete_popup.on_close = on_close
-        else:
-            self._autocomplete_popup = AutocompletePopup(
-                self.root,
-                self.text,
-                suggestions,
-                trigger_pos,
-                prefix,
-                on_select,
-                on_close=on_close,
-            )
+            self._autocomplete_popup.close()
+            self._autocomplete_popup = None
 
     def _on_autocomplete_nav(self, event):
         """补全弹窗打开时，Up/Down 选择候选"""

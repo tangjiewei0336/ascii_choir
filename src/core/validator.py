@@ -11,9 +11,14 @@ from src.core.parser import (
     ParsedScore,
     _strip_comments,
     _extract_and_expand_defines_with_mapping,
+    _parse_global,
+    _tonality_to_semitones,
+    VALID_INSTRUMENT_TAGS,
+    VOLUME_MAP,
     NoteEvent,
     ChordEvent,
 )
+from src.utils.chord_symbols import parse_chord_symbol
 
 
 def _build_stripped_to_raw_mapping(raw_text: str) -> list[int]:
@@ -369,6 +374,118 @@ def _check_instrument_range(score: ParsedScore, text: str) -> list[Diagnostic]:
     return diags
 
 
+def _check_duplicate_defines(text: str) -> list[Diagnostic]:
+    """检查同一 define 名出现多种不同内容，视为错误；相同内容重复定义则警告。"""
+    diags: list[Diagnostic] = []
+    seen: dict[str, tuple[str, int, int]] = {}  # key -> (value, line, col)
+    for m in re.finditer(r"\\define\{([^{}]+)\}\{([^{}]*)\}\s*", text, re.I):
+        key = m.group(1).strip()
+        val = m.group(2)
+        if not key:
+            continue
+        line, col = _pos_to_line_col(text, m.start())
+        if key in seen:
+            prev_val, prev_line, prev_col = seen[key]
+            if prev_val != val:
+                diags.append(Diagnostic(
+                    line, col,
+                    f"重复定义 \\define{{{key}}}{{...}}：已存在不同内容，请使用 {key}_1、{key}_2 等区分",
+                    "error",
+                    m.start(),
+                    m.end(),
+                ))
+            else:
+                diags.append(Diagnostic(
+                    line, col,
+                    f"冗余定义 \\define{{{key}}}{{...}}：与第 {prev_line} 行重复，可删除",
+                    "warning",
+                    m.start(),
+                    m.end(),
+                ))
+        else:
+            seen[key] = (val, line, col)
+    return diags
+
+
+def _is_valid_bracket_content(inner: str, at_line_start: bool, tonality_offset: int = 0) -> bool:
+    """判断方括号内容是否可解析：乐器、记号或和弦符号。"""
+    s = inner.strip().lower()
+    if not s:
+        return False
+    if at_line_start and s in VALID_INSTRUMENT_TAGS:
+        return True
+    if s in VOLUME_MAP:
+        return True
+    if s in ("crescendo", "c", "decrescendo", "d"):
+        return True
+    if re.match(r"^(distortion|drive):\d+$", s):
+        return True
+    if s in ("deviation explicit on", "deviation explicit off"):
+        return True
+    if s in ("8vb", "8va", "15va", "15vb"):
+        return True
+    if re.match(r"^[+-]?[35]$", s.replace(" ", "")):
+        return True
+    if s in ("dc", "fine", "a", "arpeggio", "r"):
+        return True
+    if s in ("tr", "tr+", "tr-", "gliss"):
+        return True
+    if parse_chord_symbol(inner.strip(), tonality_offset):
+        return True
+    return False
+
+
+def _check_unparseable_brackets(
+    text: str,
+    expanded: str,
+    expanded_to_stripped: list[int],
+    stripped_to_raw: list[int],
+    tonality_offset: int,
+) -> list[Diagnostic]:
+    """检查展开后文本中无法解析的方括号内容，视为错误。"""
+    diags: list[Diagnostic] = []
+    lines = expanded.split("\n")
+    line_starts: list[int] = []
+    pos = 0
+    for ln in lines:
+        line_starts.append(pos)
+        pos += len(ln) + 1
+
+    def expanded_pos_to_raw(exp_pos: int) -> int:
+        if exp_pos >= len(expanded_to_stripped):
+            return stripped_to_raw[-1] if stripped_to_raw else 0
+        st = expanded_to_stripped[exp_pos]
+        if st >= len(stripped_to_raw):
+            return stripped_to_raw[-1] if stripped_to_raw else 0
+        return stripped_to_raw[st]
+
+    for m in re.finditer(r"\[([^\[\]]+)\]", expanded):
+        inner = m.group(1).strip()
+        if not inner:
+            continue
+        exp_start, exp_end = m.start(), m.end()
+        line_no = 1
+        for i, ls in enumerate(line_starts):
+            if exp_start >= ls:
+                line_no = i + 1
+        line_start = line_starts[line_no - 1] if line_no <= len(line_starts) else 0
+        line_content = expanded[line_start:].split("\n")[0] if line_start < len(expanded) else ""
+        prefix = expanded[line_start:exp_start]
+        at_line_start = not any(c in prefix for c in "|()0123456789")
+        if not _is_valid_bracket_content(inner, at_line_start, tonality_offset):
+            raw_start = expanded_pos_to_raw(exp_start)
+            raw_end = expanded_pos_to_raw(exp_end - 1) + 1
+            line, col = _pos_to_line_col(text, raw_start)
+            diags.append(Diagnostic(
+                line, col,
+                f"无法解析的方括号内容「[{inner}]」：既不是乐器/记号，也不是和弦符号或 define",
+                "error",
+                raw_start,
+                raw_end,
+            ))
+    return diags
+
+
 def _check_fullwidth(text: str) -> list[Diagnostic]:
     """检查全角字符"""
     diags: list[Diagnostic] = []
@@ -421,6 +538,12 @@ def validate(text: str) -> tuple[ParsedScore | None, list[Diagnostic]]:
     stripped = _strip_comments(text)
     expanded, expanded_to_stripped = _extract_and_expand_defines_with_mapping(stripped)
     stripped_to_raw = _build_stripped_to_raw_mapping(text)
+
+    diags.extend(_check_duplicate_defines(text))
+    settings_for_tonality, _ = _parse_global(expanded)
+    tonality_offset = _tonality_to_semitones(settings_for_tonality.tonality)
+    diags.extend(_check_unparseable_brackets(text, expanded, expanded_to_stripped, stripped_to_raw, tonality_offset))
+
     try:
         score = _parse(expanded, expand_defines=False)
     except ParseError as e:
