@@ -217,6 +217,25 @@ def _is_hold_lyric(lyric: str) -> bool:
     return s in ("-", "ー", "−", "―")
 
 
+def _normalize_lyric_for_voicevox(lyric: str) -> str:
+    """将歌词规范化为 voicevox 歌唱 API 接受的「零或一个 mora 假名」格式。
+    voicevox_core Note 要求 lyric 为 katakana mora，平假名「を」等会报错，需转换。"""
+    s = (lyric or "").strip()
+    if not s:
+        return ""
+    # 平假名 -> 片假名（U+3041-3096 偏移 0x60）
+    result: list[str] = []
+    for c in s:
+        if "\u3041" <= c <= "\u3096":
+            result.append(chr(ord(c) + 0x60))
+        else:
+            result.append(c)
+    out = "".join(result)
+    # voicevox 歌唱不接受 ヲ，按发音转为 オ
+    out = out.replace("ヲ", "オ")
+    return out
+
+
 def _apply_gain_envelope(
     audio: np.ndarray, sample_rate: int,
     notes: list[tuple[float, float, Optional[int], str, int]],
@@ -248,11 +267,12 @@ def _notes_to_voicevox_format(
         frame_length = int(round(duration * SING_FRAME_RATE))
         if frame_length < 1:
             frame_length = 1
+        raw = lyric.strip() if lyric else ""
         out.append({
             "id": str(uuid.uuid4()),
             "key": midi,  # 休止符为 None
             "frame_length": frame_length,
-            "lyric": lyric.strip() if lyric else "",  # 休止符 lyric 为空
+            "lyric": _normalize_lyric_for_voicevox(raw),  # 休止符 lyric 为空
         })
     return out
 
@@ -434,8 +454,10 @@ def synthesize_acappella(
                 voice_id_override is not None and has_lyrics_syllables(parsed, seg.section_index)
             )
             if can_sing:
-                # 不截断，生成完整歌词内容
-                lyrics_ck = cache_key_lyrics_from_parsed(parsed, seg.section_index, sample_rate)
+                # 不截断，生成完整歌词内容；voice_id_override 纳入缓存键
+                lyrics_ck = cache_key_lyrics_from_parsed(
+                    parsed, seg.section_index, sample_rate, voice_id_override
+                )
                 sing_result = _synthesize_section(
                     parsed, seg.section_index, sample_rate,
                     max_duration_seconds=None,

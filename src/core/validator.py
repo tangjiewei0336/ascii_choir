@@ -251,7 +251,12 @@ def _check_voicevox_connection(text: str) -> tuple[list[Diagnostic], bool]:
         fetch_singers(VOICEVOX_BASE)
         return diags, True
     except Exception:
-        diags.append(Diagnostic(1, 1, VOICEVOX_UNREACHABLE_MSG, "warning", None, None))
+        try:
+            from src.voice.voicevox_client import get_voicevox_connection_hint
+            msg = get_voicevox_connection_hint()
+        except Exception:
+            msg = VOICEVOX_UNREACHABLE_MSG
+        diags.append(Diagnostic(1, 1, msg, "warning", None, None))
         return diags, False
 
 

@@ -1,23 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
 ASCII Choir PyInstaller 打包配置
-用法: pyinstaller ascii_choir.spec
+用法: pip install -r requirements.txt && pyinstaller ascii_choir.spec
 """
 import sys
+from PyInstaller.utils.hooks import collect_submodules, collect_all
+
+# Windows 上 numpy 需 collect_all 才能正确打包 DLL
+numpy_datas, numpy_binaries, numpy_hidden = collect_all("numpy")
 
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=[],
-    datas=[
-        ("sound_library", "sound_library"),
-        ("workspaces", "workspaces"),
-    ],
+    binaries=numpy_binaries,
+    # sound_library、workspaces 不打包，放 exe 同目录，避免每次启动解压
+    datas=numpy_datas,
     hiddenimports=[
-        "numpy", "PIL", "PIL.Image", "PIL.ImageTk",
+        "numpy", "Pillow",
         "sounddevice", "soundfile",
         "edge_tts", "audioread", "pydub", "audioop",
-    ],
+    ] + numpy_hidden + collect_submodules("PIL"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

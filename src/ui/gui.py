@@ -361,6 +361,7 @@ class App:
         
         self._build_menu()
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_quit)
     
     def _build_menu(self):
         """构建菜单栏：文件、编辑"""
@@ -379,7 +380,7 @@ class App:
         file_menu.add_command(label="打开工作区...", command=self._on_open_workspace)
         file_menu.add_command(label="打开示例工作区", command=self._on_open_example_workspace)
         file_menu.add_separator()
-        file_menu.add_command(label="退出", command=self.root.quit)
+        file_menu.add_command(label="退出", command=self._on_quit)
         
         edit_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="编辑", menu=edit_menu)
@@ -404,11 +405,13 @@ class App:
         voice_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="音色", menu=voice_menu)
         voice_menu.add_command(label="VOICEVOX 音色选择...", command=self._on_voicevox_voices)
+        voice_menu.add_command(label="VOICEVOX 音声模型管理...", command=self._on_voicevox_models)
         voice_menu.add_command(label="乐器面板...", command=self._on_instrument_panel)
 
         settings_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="设置", menu=settings_menu)
         settings_menu.add_command(label="AI 设置...", command=self._on_ai_settings)
+        settings_menu.add_command(label="VOICEVOX 设置...", command=self._on_voicevox_settings)
         settings_menu.add_command(label="缓存设置...", command=self._on_cache_settings)
 
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -464,6 +467,12 @@ class App:
             self._save_to(self.current_file_path)
         else:
             self._on_save_as()
+
+    def _on_quit(self):
+        """关闭软件时触发一次保存，然后退出"""
+        if self.current_file_path:
+            self._save_to(self.current_file_path, silent=True)
+        self.root.quit()
     
     def _on_save_as(self):
         initialdir = str(self.current_file_path.parent) if self.current_file_path else None
@@ -922,6 +931,15 @@ class App:
         """时值乘以2：每个音符去掉一个 _（十六分→八分→四分，最多四分）"""
         self._apply_duration_operation(duration_multiply_two)
 
+    def _on_voicevox_models(self):
+        """打开 VOICEVOX 音声模型管理（下载音色、安装本地库，无需 Docker）"""
+        try:
+            from src.voice.voicevox_model_dialog import show_voicevox_model_dialog
+            show_voicevox_model_dialog(self.root)
+        except Exception as e:
+            import traceback
+            show_error_detail(self.root, "错误", f"无法加载模型管理: {e}", traceback.format_exc())
+
     def _on_voicevox_voices(self):
         """打开 VOICEVOX 音色选择对话框（音色列表 + 利用規約 + 试听 + 清唱生成）"""
         try:
@@ -1083,6 +1101,57 @@ class App:
 
         btn_frame = ttk.Frame(main)
         btn_frame.pack(pady=(20, 0))
+        ttk.Button(btn_frame, text="确定", command=_on_ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="取消", command=dlg.destroy).pack(side=tk.LEFT)
+
+        dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 80}")
+        dlg.grab_set()
+        dlg.focus_set()
+
+    def _on_voicevox_settings(self):
+        """打开 VOICEVOX 后端设置（本地库 / Docker）"""
+        try:
+            from src.utils.voicevox_settings import (
+                VOICEVOX_BACKENDS,
+                VOICEVOX_BACKEND_LABELS,
+                get_voicevox_backend,
+                set_voicevox_backend,
+            )
+            from src.voice.voicevox_client import clear_singers_cache
+        except ImportError:
+            messagebox.showwarning("VOICEVOX 设置", "无法加载设置模块", parent=self.root)
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("VOICEVOX 设置")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+
+        main = ttk.Frame(dlg, padding=15)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main, text="VOICEVOX 后端：").pack(anchor=tk.W)
+        backend_var = tk.StringVar(value=get_voicevox_backend())
+        backend_frame = ttk.Frame(main)
+        backend_frame.pack(fill=tk.X, pady=(5, 10))
+        for b in VOICEVOX_BACKENDS:
+            ttk.Radiobutton(
+                backend_frame,
+                text=VOICEVOX_BACKEND_LABELS.get(b, b),
+                variable=backend_var,
+                value=b,
+            ).pack(side=tk.LEFT, padx=(0, 15))
+
+        ttk.Label(main, text="• 自动选择：本地库可用时优先使用，否则用 Docker\n• 本地库：需安装 voicevox_core 和音声模型（音色 → 音声模型管理）\n• Docker：需运行 voicevox_engine 容器（默认端口 50021）", font=("", 9), foreground="gray").pack(anchor=tk.W, pady=(0, 15))
+
+        def _on_ok():
+            set_voicevox_backend(backend_var.get())
+            clear_singers_cache()
+            messagebox.showinfo("保存", "已保存 VOICEVOX 设置", parent=dlg)
+            dlg.destroy()
+
+        btn_frame = ttk.Frame(main)
+        btn_frame.pack(pady=(10, 0))
         ttk.Button(btn_frame, text="确定", command=_on_ok).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="取消", command=dlg.destroy).pack(side=tk.LEFT)
 
@@ -2612,8 +2681,13 @@ class App:
         def run():
             try:
                 self.player.play_score(score_text)
-            except Exception:
-                pass
+            except Exception as e:
+                err_msg, err_type = str(e), type(e).__name__
+                from src.voice.voicevox_model_dialog import should_show_vvm_download_for_error, show_style_not_found_dialog
+                if should_show_vvm_download_for_error(err_msg, err_type):
+                    def _show_dl():
+                        show_style_not_found_dialog(self.root, for_sing=True, err_msg=err_msg)
+                    self.root.after(0, _show_dl)
             finally:
                 self.root.after(0, lambda: self._on_preview_finished(play_id))
 
@@ -2675,7 +2749,11 @@ class App:
         self._cached_score = score
         self._diag_list.delete(0, tk.END)
         self._diag_data = diags
-        voicevox_unreachable = any(d.message == VOICEVOX_UNREACHABLE_MSG for d in diags)
+        voicevox_unreachable = any(
+            d.message == VOICEVOX_UNREACHABLE_MSG
+            or ("voicevox" in d.message.lower() and ("请" in d.message or "连接" in d.message))
+            for d in diags
+        )
         if hasattr(self, "btn_voicevox"):
             self.btn_voicevox.config(state=tk.DISABLED if voicevox_unreachable else tk.NORMAL)
         self._update_status_bar(score)
@@ -3212,8 +3290,14 @@ class App:
                 self.player.play_score(excerpt)
             except Exception as e:
                 import traceback
-                err_msg, tb = str(e), traceback.format_exc()
-                self.root.after(0, lambda: show_error_detail(self.root, "播放错误", err_msg, tb))
+                err_msg, tb, err_type = str(e), traceback.format_exc(), type(e).__name__
+                from src.voice.voicevox_model_dialog import should_show_vvm_download_for_error, show_style_not_found_dialog
+                if should_show_vvm_download_for_error(err_msg, err_type):
+                    def _show_dl():
+                        show_style_not_found_dialog(self.root, for_sing=True, err_msg=err_msg)
+                    self.root.after(0, _show_dl)
+                else:
+                    self.root.after(0, lambda: show_error_detail(self.root, "播放错误", err_msg, tb))
             finally:
                 self.root.after(0, self._on_play_finished)
 
@@ -3303,14 +3387,20 @@ class App:
                 self.player.play_score(score)
             except Exception as e:
                 import traceback
-                err_msg, tb = str(e), traceback.format_exc()
-                self.root.after(0, lambda: show_error_detail(self.root, "播放错误", err_msg, tb))
+                err_msg, tb, err_type = str(e), traceback.format_exc(), type(e).__name__
+                from src.voice.voicevox_model_dialog import should_show_vvm_download_for_error, show_style_not_found_dialog
+                if should_show_vvm_download_for_error(err_msg, err_type):
+                    def _show_dl():
+                        show_style_not_found_dialog(self.root, for_sing=True, err_msg=err_msg)
+                    self.root.after(0, _show_dl)
+                else:
+                    self.root.after(0, lambda: show_error_detail(self.root, "播放错误", err_msg, tb))
             finally:
                 self.root.after(0, self._on_play_finished)
 
         self.play_thread = threading.Thread(target=run, daemon=True)
         self.play_thread.start()
-    
+
     def _ensure_status_progress(self) -> None:
         """在状态栏显示嵌入的进度条（播放阶段）"""
         if self._status_progress_frame and self._status_progress_frame.winfo_exists():

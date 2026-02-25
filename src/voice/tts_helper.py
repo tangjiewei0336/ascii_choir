@@ -53,6 +53,10 @@ def generate_tts_audio(
             save_audio_to_cache(ck, data, result[1])
             return result
         except Exception as e:
+            err_msg = str(e)
+            # TTS 模型缺失（对话模型）时向上抛出，让播放/合成流程捕获并提示下载
+            if "对话" in err_msg or "0.vvm" in err_msg:
+                raise
             if "voicevox" not in _tts_warned:
                 _tts_warned.add("voicevox")
                 print(f"[TTS] VOICEVOX 合成失败（请确保引擎已启动）: {e}")

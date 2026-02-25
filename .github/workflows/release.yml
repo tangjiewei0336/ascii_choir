@@ -20,8 +20,12 @@ jobs:
 
       - name: Install and build
         run: |
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt "pyinstaller>=6.14.0"
           pyinstaller ascii_choir.spec
+
+      - name: Copy resources to dist
+        run: |
+          cp -r sound_library workspaces dist/
 
       - name: Zip artifact
         run: |
@@ -46,8 +50,12 @@ jobs:
 
       - name: Install and build
         run: |
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt "pyinstaller>=6.14.0"
           pyinstaller ascii_choir.spec
+
+      - name: Copy resources to dist
+        run: |
+          Copy-Item -Recurse -Force sound_library, workspaces -Destination dist
 
       - name: Zip artifact
         run: |

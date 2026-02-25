@@ -248,7 +248,13 @@ def cache_key_lyrics(score_text: str, section_index: int, sample_rate: int) -> s
     return _make_hash("lyrics", score_text, section_index, sample_rate)
 
 
-def cache_key_lyrics_from_parsed(score: "ParsedScore", section_index: int, sample_rate: int) -> str:
-    """歌词歌声合成的缓存键（仅侦测人声轨变动，伴奏等修改不失效）"""
+def cache_key_lyrics_from_parsed(
+    score: "ParsedScore",
+    section_index: int,
+    sample_rate: int,
+    voice_id_override: Optional[int] = None,
+) -> str:
+    """歌词歌声合成的缓存键（仅侦测人声轨变动，伴奏等修改不失效）。
+    voice_id_override 有值时纳入缓存键，避免清唱生成时不同音色共用缓存。"""
     fp = _lyrics_fingerprint(score, section_index)
-    return _make_hash("lyrics_v2", fp, section_index, sample_rate)
+    return _make_hash("lyrics_v2", fp, section_index, sample_rate, voice_id_override)

@@ -1,15 +1,63 @@
 """
 VOICEVOX API 客户端
-连接 voicevox_engine (http://localhost:50021)
-支持 /speakers、/audio_query、/synthesis 端点
+根据设置使用本地 voicevox_core 或 Docker voicevox_engine (http://localhost:50021)
 """
 import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Optional
+from typing import Literal, Optional
 
 VOICEVOX_BASE = "http://127.0.0.1:50021"
+
+
+def _is_core_available() -> bool:
+    """voicevox_core 是否可用"""
+    try:
+        from src.voice.voicevox_core_backend import is_core_available
+        return is_core_available()
+    except Exception:
+        return False
+
+
+def _use_core() -> bool:
+    """是否使用本地 voicevox_core 后端（受设置控制）"""
+    from src.utils.voicevox_settings import get_voicevox_backend
+    backend = get_voicevox_backend()
+    if backend == "docker":
+        return False
+    if backend == "core":
+        return _is_core_available()
+    # auto: core 可用则用 core
+    return _is_core_available()
+
+
+def get_effective_voicevox_mode() -> Literal["core", "docker"]:
+    """当前实际使用的模式，用于 UI 显示"""
+    if _use_core():
+        return "core"
+    return "docker"
+
+
+def get_voicevox_connection_hint() -> str:
+    """连接失败时的提示文案（根据当前设置）"""
+    from src.utils.voicevox_settings import get_voicevox_backend
+    backend = get_voicevox_backend()
+    if backend == "core":
+        if _is_core_available():
+            return "本地库异常，请重试"
+        return "请安装 voicevox_core 和音声模型（音色 → VOICEVOX 音声模型管理）"
+    return "请确保 voicevox_engine 已启动 (http://localhost:50021)"
+
+
+def get_voicevox_mode_label() -> str:
+    """当前模式显示文案，用于音色面板"""
+    from src.utils.voicevox_settings import get_voicevox_backend
+    backend = get_voicevox_backend()
+    if backend == "core" and not _is_core_available():
+        return "本地库（未就绪，请安装 voicevox_core 和音声模型）"
+    mode = get_effective_voicevox_mode()
+    return "本地库 (voicevox_core)" if mode == "core" else "Docker (voicevox_engine)"
 
 # 音色名称 -> 利用規約・クレジット情報
 VOICE_LEGAL_INFO: dict[str, str] = {
@@ -78,7 +126,13 @@ def fetch_speakers(base_url: str = VOICEVOX_BASE) -> list[dict]:
     """
     获取可用音色列表。
     返回 [{"name": "角色名", "speaker_uuid": "...", "styles": [{"id": 1, "name": "风格名"}, ...]}, ...]
+    本地库模式下始终返回完整列表（speakers_full_bundled.json），供音色面板展示全部角色；
+    未下载的由 is_speaker_available 置灰。不依赖 get_metas_core（仅返回已加载模型角色，会导致只显示部分）。
     """
+    from src.utils.voicevox_settings import get_voicevox_backend
+    if get_voicevox_backend() == "core":
+        from src.voice.voicevox_speaker_catalog import get_full_speakers_for_display
+        return get_full_speakers_for_display()
     status, body = _request("GET", f"{base_url}/speakers")
     if status != 200:
         raise RuntimeError(_format_error(status, body, "/speakers"))
@@ -95,7 +149,15 @@ def fetch_speaker_info(
     获取角色详细信息，包含头像（portrait）和图标（icon）。
     resource_format: "url" 返回可访问的 URL；"base64" 返回 base64 编码的图片数据。
     返回 {"policy": str, "portrait": str, "style_infos": [{"id": int, "icon": str, "portrait": str, ...}]}
+    本地库模式下无 portrait/icon，返回空结构。
     """
+    if _use_core():
+        from src.voice.voicevox_speaker_cache import load_speaker_info_from_cache
+        cached = load_speaker_info_from_cache(speaker_uuid)
+        if cached is not None:
+            return cached
+        # 无缓存时返回空结构（音色列表仍可用，仅无头像）
+        return {"policy": "", "portrait": "", "style_infos": []}
     url = f"{base_url}/speaker_info?speaker_uuid={urllib.parse.quote(speaker_uuid)}&resource_format={resource_format}"
     status, body = _request("GET", url)
     if status != 200:
@@ -131,6 +193,9 @@ def synthesize_simple(text: str, speaker_id: int, base_url: str = VOICEVOX_BASE)
     """
     简单合成：文本 -> WAV 字节。
     """
+    if _use_core():
+        from src.voice.voicevox_core_backend import synthesize_simple_core
+        return synthesize_simple_core(text, speaker_id)
     q = audio_query(text, speaker_id, base_url)
     return synthesis(q, speaker_id, base_url)
 
@@ -148,10 +213,10 @@ def sing_frame_audio_query(
     """
     歌唱用帧级查询。speaker 固定为 6000，仅生成查询结构。
     notes: [{"id": str, "key": int, "frame_length": int, "lyric": str}, ...]
-      - key: MIDI 音高
-      - frame_length: 帧数 (duration_sec * frame_rate)
-      - lyric: 歌词，如 "あ"、"か"
     """
+    if _use_core():
+        from src.voice.voicevox_core_backend import create_sing_frame_audio_query_core
+        return create_sing_frame_audio_query_core(notes)
     url = f"{base_url}/sing_frame_audio_query?speaker={SING_FRAME_QUERY_SPEAKER}"
     data = json.dumps({"notes": notes}, ensure_ascii=False).encode("utf-8")
     status, body = _request("POST", url, data=data)
@@ -169,6 +234,9 @@ def frame_synthesis(
     根据 FrameAudioQuery 合成歌唱 WAV 字节。
     speaker_id 必须使用 /singers 中的 style_id。
     """
+    if _use_core():
+        from src.voice.voicevox_core_backend import frame_synthesis_core
+        return frame_synthesis_core(frame_audio_query, speaker_id)
     url = f"{base_url}/frame_synthesis?speaker={speaker_id}"
     data = json.dumps(frame_audio_query, ensure_ascii=False).encode("utf-8")
     status, body = _request("POST", url, data=data)
@@ -191,8 +259,15 @@ def fetch_singers(base_url: str = VOICEVOX_BASE) -> list[dict]:
     获取歌唱用角色列表（/singers）。
     歌唱 API 需使用此列表中的 style_id，普通 /speakers 的 style 可能不支持歌唱。
     """
+    from src.utils.voicevox_settings import get_voicevox_backend
     global _singers_cache
+    if get_voicevox_backend() == "core" and not _is_core_available():
+        return []  # 未就绪时返回空，音色面板仍可展示 TTS 列表
     if _singers_cache is not None:
+        return _singers_cache
+    if _use_core():
+        from src.voice.voicevox_core_backend import get_singers_core
+        _singers_cache = get_singers_core()
         return _singers_cache
     try:
         status, body = _request("GET", f"{base_url}/singers")
