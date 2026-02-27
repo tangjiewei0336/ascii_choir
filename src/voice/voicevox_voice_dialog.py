@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
+from src.utils.i18n import _
 from src.voice.voicevox_client import (
     fetch_speakers,
     fetch_speaker_info,
@@ -171,7 +172,7 @@ def _play_wav_bytes(wav_bytes: bytes) -> None:
         except OSError:
             pass
     except Exception as e:
-        messagebox.showerror("播放失败", str(e))
+        messagebox.showerror(_("播放失败"), str(e))
 
 
 class VoiceVoxVoiceDialog(tk.Toplevel):
@@ -188,7 +189,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         self.base_url = base_url
         self.get_score_callback = get_score_callback
         self.get_current_file_callback = get_current_file_callback
-        self.title("VOICEVOX 音色选择")
+        self.title(_("VOICEVOX 音色选择"))
         self.geometry("1050x820")
         self.transient(parent)
 
@@ -206,13 +207,13 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
 
         self._mode_label = ttk.Label(main, text="", font=("", 9), foreground="gray")
         self._mode_label.pack(anchor=tk.W)
-        ttk.Label(main, text="左侧点击音色即试听（TTS 模式为对话试听，歌唱模式用于歌词合成）").pack(anchor=tk.W)
+        ttk.Label(main, text=_("左侧点击音色即试听（TTS 模式为对话试听，歌唱模式用于歌词合成）")).pack(anchor=tk.W)
 
         paned = ttk.PanedWindow(main, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, pady=5)
 
         # 左侧：TTS / 歌唱 两个 tab
-        left_frame = ttk.LabelFrame(paned, text="音色", padding=5)
+        left_frame = ttk.LabelFrame(paned, text=_("音色"), padding=5)
         paned.add(left_frame, weight=1)
         self._notebook = ttk.Notebook(left_frame)
         self._notebook.pack(fill=tk.BOTH, expand=True)
@@ -224,7 +225,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
             f.pack(fill=tk.BOTH, expand=True)
             tree = ttk.Treeview(f, height=12, show="tree headings", columns=("name", "extra"), selectmode="browse")
             tree.heading("#0", text="")
-            tree.heading("name", text="角色 - 风格")
+            tree.heading("name", text=_("角色 - 风格"))
             tree.heading("extra", text="")
             tree.column("#0", width=50, minwidth=50)
             tree.column("name", width=160, minwidth=100)
@@ -238,16 +239,16 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
 
         self._frame_tts = ttk.Frame(self._notebook)
         self._frame_sing = ttk.Frame(self._notebook)
-        self._notebook.add(self._frame_tts, text="TTS 模式")
-        self._notebook.add(self._frame_sing, text="歌唱模式")
+        self._notebook.add(self._frame_tts, text=_("TTS 模式"))
+        self._notebook.add(self._frame_sing, text=_("歌唱模式"))
         self.tree_tts = _make_tree(self._frame_tts, "tts")
         self.tree_sing = _make_tree(self._frame_sing, "sing")
         self.tree = self.tree_tts  # 兼容复制命令等使用
 
         # 右侧：全身照背景 + 利用規約，右上角显示当前音色 ID
-        right_frame = ttk.LabelFrame(paned, text="角色信息・利用規約", padding=5)
+        right_frame = ttk.LabelFrame(paned, text=_("角色信息・利用規約"), padding=5)
         paned.add(right_frame, weight=3)
-        self._id_label = ttk.Label(right_frame, text="ID: —", font=("", 11))
+        self._id_label = ttk.Label(right_frame, text=_("ID: —"), font=("", 11))
         self._id_label.place(relx=1.0, rely=0, anchor=tk.NE, x=-8, y=4)
         self._right_canvas = tk.Canvas(right_frame, bg="#e0e0e0", highlightthickness=0)
         self._right_canvas.pack(fill=tk.BOTH, expand=True)
@@ -260,12 +261,12 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
 
         btn_frame = ttk.Frame(main)
         btn_frame.pack(fill=tk.X, pady=(10, 0))
-        ttk.Button(btn_frame, text="复制 TTS 命令", command=self._copy_tts_cmd).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(btn_frame, text="复制 歌词命令", command=self._copy_lyrics_cmd).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text=_("复制 TTS 命令"), command=self._copy_tts_cmd).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text=_("复制 歌词命令"), command=self._copy_lyrics_cmd).pack(side=tk.LEFT, padx=(0, 5))
         if get_score_callback:
-            ttk.Button(btn_frame, text="清唱生成", command=self._on_acappella).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(btn_frame, text="刷新列表", command=self._load_speakers).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="关闭", command=self.destroy).pack(side=tk.RIGHT)
+            ttk.Button(btn_frame, text=_("清唱生成"), command=self._on_acappella).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text=_("刷新列表"), command=self._load_speakers).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text=_("关闭"), command=self.destroy).pack(side=tk.RIGHT)
 
         self._status = ttk.Label(main, text="")
         self._status.pack(anchor=tk.W, pady=(5, 0))
@@ -274,8 +275,8 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
 
     def _load_speakers(self) -> None:
         """从 API 加载音色列表"""
-        self._mode_label.config(text=f"当前模式：{get_voicevox_mode_label()}")
-        self._status.config(text="正在连接 VOICEVOX...")
+        self._mode_label.config(text=_("当前模式：{mode}").format(mode=_(get_voicevox_mode_label())))
+        self._status.config(text=_("正在连接 VOICEVOX..."))
         self.update_idletasks()
         clear_singers_cache()
 
@@ -339,17 +340,17 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                     _add_row(self.tree_sing, "sing", sp, st, False, "是")
         label = get_voicevox_mode_label()
         mode = label.split("（")[0].split(" (")[0].strip()  # "本地库" or "Docker"
-        mode_suffix = f"（{mode}）"
-        status_text = f"已加载 {total} 个音色 {mode_suffix}"
+        mode_suffix = _("（{mode}）").format(mode=_(mode))
+        status_text = _("已加载 {total} 个音色 {mode_suffix}").format(total=total, mode_suffix=mode_suffix)
         if not self.singers_data:
-            status_text += "（未检测到歌唱角色，请安装 s0.vvm 等歌唱音声库）"
-        status_text += "，正在加载头像..."
+            status_text += _("（未检测到歌唱角色，请安装 s0.vvm 等歌唱音声库）")
+        status_text += _("，正在加载头像...")
         self._status.config(text=status_text)
         last_style = _load_last_style_id()
         threading.Thread(target=self._load_all_icons, daemon=True).start()
         # 恢复上次选择的音色（仅展示，不自动试听）
         if last_style is not None:
-            for (m, iid), (sid, _, _, _, _) in self.voice_map.items():
+            for (m, iid), (sid, _n, _u, _a, _r) in self.voice_map.items():
                 if sid == last_style:
                     t = self.tree_tts if m == "tts" else self.tree_sing
                     def _restore(item=iid, tr=t, mode=m):
@@ -418,23 +419,23 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                     if not icon:
                         icon = fallback_icon
                     if icon:
-                        for (m, iid), (isid, _, cuuid, _, _) in self.voice_map.items():
+                        for (m, iid), (isid, _n, cuuid, _a, _r) in self.voice_map.items():
                             if cuuid == uuid and isid == sid:
                                 self._icon_photos[(m, iid)] = icon
                                 tr = self.tree_tts if m == "tts" else self.tree_sing
                                 _safe_ui(self, lambda x=iid, img=icon, t=tr: t.item(x, image=img))
             except Exception:
                 pass
-        _safe_ui(self, lambda: self._status.config(text=f"已加载 {len(self.voice_map)} 个音色"))
+        _safe_ui(self, lambda: self._status.config(text=_("已加载 {total} 个音色").format(total=len(self.voice_map))))
 
     def _on_error(self, msg: str, tb: str = "") -> None:
         self._status.config(text="")
         try:
             from src.ui.gui import show_error_detail
-            show_error_detail(self, "VOICEVOX 连接失败", msg, tb if tb else None)
+            show_error_detail(self, _("VOICEVOX 连接失败"), msg, tb if tb else None)
         except ImportError:
-            messagebox.showerror("VOICEVOX 连接失败", msg + (f"\n\n{tb}" if tb else ""))
-        self._status.config(text="连接失败：" + get_voicevox_connection_hint())
+            messagebox.showerror(_("VOICEVOX 连接失败"), msg + (f"\n\n{tb}" if tb else ""))
+        self._status.config(text=_("连接失败：") + _(get_voicevox_connection_hint()))
 
     def _on_select(self, event=None, skip_preview: bool = False, mode: str = "tts") -> None:
         tree = self.tree_tts if mode == "tts" else self.tree_sing
@@ -444,7 +445,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         item_id = sel[0]
         key = (mode, item_id)
         if key not in self.voice_map:
-            self._id_label.config(text="ID: —")
+            self._id_label.config(text=_("ID: —"))
             self._set_background(None)
             return
         style_id, speaker_name, speaker_uuid, is_available, required_vvm = self.voice_map[key]
@@ -460,21 +461,21 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         # 未下载角色：点击时提示需下载的 VVM
         if not is_available and required_vvm and not skip_preview:
             self._status.config(text="")
-            if messagebox.askyesno("需要下载音声模型", f"使用此音色需要下载 {required_vvm}。\n是否立即下载？"):
+            if messagebox.askyesno(_("需要下载音声模型"), _("使用此音色需要下载 {vvm}。\n是否立即下载？").format(vvm=required_vvm)):
                 from src.voice.voicevox_model_dialog import show_vvm_download_dialog
                 ok, err = show_vvm_download_dialog(self.winfo_toplevel(), required_vvm)
                 if ok:
-                    messagebox.showinfo("下载完成", f"{required_vvm} 已下载，请点击「刷新列表」后重试。")
+                    messagebox.showinfo(_("下载完成"), _("{vvm} 已下载，请点击「刷新列表」后重试。").format(vvm=required_vvm))
                 elif err:
-                    messagebox.showerror("下载失败", err)
+                    messagebox.showerror(_("下载失败"), err)
             return
         # 点击即试听（TTS 模式试听对话，歌唱模式仅展示）
         if skip_preview:
             self._status.config(text="")
         elif mode == "tts":
-            self._status.config(text="正在合成试听...")
+            self._status.config(text=_("正在合成试听..."))
         else:
-            self._status.config(text="歌唱模式：用于歌词合成，点击「清唱生成」试听")
+            self._status.config(text=_("歌唱模式：用于歌词合成，点击「清唱生成」试听"))
         self.update_idletasks()
 
         if not skip_preview and mode == "tts":
@@ -563,9 +564,9 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         self._status.config(text="")
         try:
             from src.ui.gui import show_error_detail
-            show_error_detail(self, "试听失败", msg, tb if tb else None)
+            show_error_detail(self, _("试听失败"), msg, tb if tb else None)
         except ImportError:
-            messagebox.showerror("试听失败", msg + (f"\n\n{tb}" if tb else ""))
+            messagebox.showerror(_("试听失败"), msg + (f"\n\n{tb}" if tb else ""))
 
     def _get_selected_key(self) -> tuple[str, str] | None:
         """获取当前选中项 (mode, item_id)，优先 TTS tab"""
@@ -579,9 +580,9 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         """复制当前选中音色的 TTS 命令到剪贴板"""
         key = self._get_selected_key()
         if not key or key not in self.voice_map:
-            messagebox.showinfo("复制", "请先选择音色（TTS 模式下选对话音色）")
+            messagebox.showinfo(_("复制"), _("请先选择音色（TTS 模式下选对话音色）"))
             return
-        style_id, _, _, _, _ = self.voice_map[key]
+        style_id, _n, _u, _a, _r = self.voice_map[key]
         cmd = f"\\tts{{こんにちは}}{{ja}}{{{style_id}}}"
         self.clipboard_clear()
         self.clipboard_append(cmd)
@@ -591,23 +592,21 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         """复制当前选中音色的 歌词命令到剪贴板"""
         key = self._get_selected_key()
         if not key or key not in self.voice_map:
-            messagebox.showinfo("复制", "请先选择音色（歌唱模式下选歌唱音色）")
+            messagebox.showinfo(_("复制"), _("请先选择音色（歌唱模式下选歌唱音色）"))
             return
-        style_id, _, _, _, _ = self.voice_map[key]
+        style_id, _n, _u, _a, _r = self.voice_map[key]
         # \lyrics{字/字}{part_index}{voice_id}{melody}  melody: 0=第一音旋律 1=第二音旋律
         cmd = f"\\lyrics{{字/字}}{{0}}{{{style_id}}}{{0}}"
         self.clipboard_clear()
         self.clipboard_append(cmd)
-        self._status.config(text=f"已复制: {cmd}")
+        self._status.config(text=_("已复制: {cmd}").format(cmd=cmd))
 
     def _no_lyrics_message(self) -> str:
         """找不到 lyrics 时的提示文案"""
         current = self.get_current_file_callback() if self.get_current_file_callback else None
-        file_hint = f"当前文件「{current.name}」" if current else "当前内容"
+        file_hint = _("当前文件「{name}」").format(name=current.name) if current else _("当前内容")
         return (
-            f"{file_hint}中没有带 \\lyrics 的简谱。\n\n"
-            "• 可在左侧工作区双击切换其他文件（如 VOCALOID.choir、自动和声.choir）\n"
-            "• 或在当前文件中添加 \\lyrics{字/字}{0}{音色id}{0}"
+            _("{hint}中没有带 \\lyrics 的简谱。\n\n• 可在左侧工作区双击切换其他文件（如 VOCALOID.choir、自动和声.choir）\n• 或在当前文件中添加 \\lyrics{{字/字}}{{0}}{{音色id}}{{0}}").format(hint=file_hint)
         )
 
     def _on_acappella(self) -> None:
@@ -616,27 +615,27 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
             return
         score_text = self.get_score_callback()
         if not score_text or not score_text.strip():
-            messagebox.showwarning("清唱生成", self._no_lyrics_message())
+            messagebox.showwarning(_("清唱生成"), self._no_lyrics_message())
             return
         sel = self.tree.selection()
         voice_id = None
         key = self._get_selected_key()
         if key and key in self.voice_map:
-            sid, _, uuid, _, _ = self.voice_map[key]
+            sid, _n, uuid, _a, _r = self.voice_map[key]
             if key[0] == "sing":
                 voice_id = sid
             else:
                 # TTS tab 选中：尝试找同角色的歌唱 style_id
-                for (m, _), (s, _, u, _, _) in self.voice_map.items():
+                for (m, _i), (s, _n, u, _a, _r) in self.voice_map.items():
                     if m == "sing" and u == uuid:
                         voice_id = s
                         break
                 if voice_id is None:
                     voice_id = sid
         if voice_id is None:
-            messagebox.showwarning("清唱生成", "请先在左侧音色列表中点击选择要使用的角色。")
+            messagebox.showwarning(_("清唱生成"), _("请先在左侧音色列表中点击选择要使用的角色。"))
             return
-        self._status.config(text="正在生成清唱...")
+        self._status.config(text=_("正在生成清唱..."))
         self.update_idletasks()
 
         def _do():
@@ -650,7 +649,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                 if not result:
                     _safe_ui(self, lambda: self._acappella_done(self._no_lyrics_message(), None))
                     return
-                audio, _ = result
+                audio, _sr = result
                 buf = io.BytesIO()
                 sf.write(buf, audio, 44100, format="WAV")
                 wav_bytes = buf.getvalue()
@@ -662,7 +661,7 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
                 if should_show_vvm_download_for_error(err_str, err_type):
                     req_vvm = None
                     if sel and sel[0] in self.voice_map:
-                        _, _, uuid, _, _ = self.voice_map[sel[0]]
+                        _s, _n, uuid, _a, _r = self.voice_map[sel[0]]
                         from src.voice.voicevox_speaker_catalog import get_required_vvm_for_speaker
                         req_vvm = get_required_vvm_for_speaker(uuid, for_talk=False)
                     def _show_dl():
@@ -681,9 +680,9 @@ class VoiceVoxVoiceDialog(tk.Toplevel):
         if err:
             try:
                 from src.ui.gui import show_error_detail
-                show_error_detail(self, "清唱生成失败", err, tb)
+                show_error_detail(self, _("清唱生成失败"), err, tb)
             except ImportError:
-                messagebox.showerror("清唱生成失败", err + (f"\n\n{tb}" if tb else ""))
+                messagebox.showerror(_("清唱生成失败"), err + (f"\n\n{tb}" if tb else ""))
 
 
 def show_voicevox_dialog(

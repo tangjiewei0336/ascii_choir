@@ -23,6 +23,7 @@ from src.utils.accompaniment import (
     save_accompaniment,
     parse_accompaniment_pattern,
 )
+from src.utils.i18n import _
 
 
 def show_accompaniment_panel(
@@ -39,10 +40,10 @@ def show_accompaniment_panel(
     on_insert: 插入生成的伴奏行
     """
     if not workspace_root or not workspace_root.is_dir():
-        messagebox.showwarning("伴奏辅助", "请先打开工作区", parent=parent)
+        messagebox.showwarning(_("伴奏辅助"), _("请先打开工作区"), parent=parent)
         return
     if not current_filename:
-        messagebox.showwarning("伴奏辅助", "请先保存当前文件到工作区", parent=parent)
+        messagebox.showwarning(_("伴奏辅助"), _("请先保存当前文件到工作区"), parent=parent)
         return
 
     config = load_accompaniment(workspace_root, current_filename)
@@ -55,35 +56,35 @@ def show_accompaniment_panel(
         patterns_4 = [patterns_4] if patterns_4 else ["1 2 3 4"]
 
     dlg = tk.Toplevel(parent)
-    dlg.title("伴奏辅助插入")
+    dlg.title(_("伴奏辅助插入"))
     dlg.transient(parent)
-    dlg.geometry("560x420")
+    dlg.geometry("560x380")
     dlg.resizable(True, True)
 
     main = ttk.Frame(dlg, padding=15)
     main.pack(fill=tk.BOTH, expand=True)
 
-    ttk.Label(main, text="用 1音、2音、3音、4音 表示和弦中按音高从低到高的各音").pack(anchor=tk.W)
-    ttk.Label(main, text="时值：- 延长一拍  _ 减半  ~ 连音线", font=("", 9), foreground="gray").pack(anchor=tk.W)
+    ttk.Label(main, text=_("用 1音、2音、3音、4音 表示和弦中按音高从低到高的各音")).pack(anchor=tk.W)
+    ttk.Label(main, text=_("时值：- 延长一拍  _ 减半  ~ 连音线"), font=("", 9), foreground="gray").pack(anchor=tk.W)
 
     ttk.Separator(main, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
 
     # 伴奏调性
     ton_frame = ttk.Frame(main)
     ton_frame.pack(fill=tk.X, pady=(0, 8))
-    ttk.Label(ton_frame, text="伴奏调性（相对旋律）：").pack(side=tk.LEFT, padx=(0, 5))
+    ttk.Label(ton_frame, text=_("伴奏调性（相对旋律）：")).pack(side=tk.LEFT, padx=(0, 5))
     ton_entry = ttk.Entry(ton_frame, width=12)
     ton_entry.pack(side=tk.LEFT)
     ton_entry.insert(0, tonality)
-    ttk.Label(ton_frame, text="（0=同调，-12=低八度，7=高五度）", font=("", 9), foreground="gray").pack(side=tk.LEFT, padx=(5, 0))
+    ttk.Label(ton_frame, text=_("（0=同调，-12=低八度，7=高五度）"), font=("", 9), foreground="gray").pack(side=tk.LEFT, padx=(5, 0))
 
     ttk.Separator(main, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
 
     # 三音和弦 - 多种模式
-    ttk.Label(main, text="三音和弦模式（可添加多种，生成时轮流使用）：").pack(anchor=tk.W)
+    ttk.Label(main, text=_("三音和弦模式（可添加多种，生成时轮流使用）：")).pack(anchor=tk.W)
     list_frame_3 = ttk.Frame(main)
     list_frame_3.pack(fill=tk.X, pady=(2, 2))
-    listbox_3 = tk.Listbox(list_frame_3, height=3, width=50, font=("Consolas", 10))
+    listbox_3 = tk.Listbox(list_frame_3, height=4, width=50, font=("Consolas", 10))
     listbox_3.pack(side=tk.LEFT, fill=tk.X, expand=True)
     for p in patterns_3:
         listbox_3.insert(tk.END, p)
@@ -99,24 +100,24 @@ def show_accompaniment_panel(
             listbox_3.insert(tk.END, s)
             entry_3.delete(0, tk.END)
             entry_3.insert(0, "1 2 3")
-            _schedule_preview()
+            _save_config()
 
     def _del_pattern_3():
         sel = listbox_3.curselection()
         if sel:
             listbox_3.delete(sel[0])
-            _schedule_preview()
+            _save_config()
 
-    ttk.Button(btn_frame_3, text="添加", command=_add_pattern_3, width=6).pack(fill=tk.X, pady=1)
-    ttk.Button(btn_frame_3, text="删除", command=_del_pattern_3, width=6).pack(fill=tk.X, pady=1)
+    ttk.Button(btn_frame_3, text=_("添加"), command=_add_pattern_3, width=6).pack(fill=tk.X, pady=1)
+    ttk.Button(btn_frame_3, text=_("删除"), command=_del_pattern_3, width=6).pack(fill=tk.X, pady=1)
 
     ttk.Separator(main, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
 
     # 四音和弦 - 多种模式
-    ttk.Label(main, text="四音和弦模式（可添加多种，生成时轮流使用）：").pack(anchor=tk.W)
+    ttk.Label(main, text=_("四音和弦模式（可添加多种，生成时轮流使用）：")).pack(anchor=tk.W)
     list_frame_4 = ttk.Frame(main)
     list_frame_4.pack(fill=tk.X, pady=(2, 2))
-    listbox_4 = tk.Listbox(list_frame_4, height=3, width=50, font=("Consolas", 10))
+    listbox_4 = tk.Listbox(list_frame_4, height=4, width=50, font=("Consolas", 10))
     listbox_4.pack(side=tk.LEFT, fill=tk.X, expand=True)
     for p in patterns_4:
         listbox_4.insert(tk.END, p)
@@ -132,59 +133,23 @@ def show_accompaniment_panel(
             listbox_4.insert(tk.END, s)
             entry_4.delete(0, tk.END)
             entry_4.insert(0, "1 2 3 4")
-            _schedule_preview()
+            _save_config()
 
     def _del_pattern_4():
         sel = listbox_4.curselection()
         if sel:
             listbox_4.delete(sel[0])
-            _schedule_preview()
+            _save_config()
 
-    ttk.Button(btn_frame_4, text="添加", command=_add_pattern_4, width=6).pack(fill=tk.X, pady=1)
-    ttk.Button(btn_frame_4, text="删除", command=_del_pattern_4, width=6).pack(fill=tk.X, pady=1)
+    ttk.Button(btn_frame_4, text=_("添加"), command=_add_pattern_4, width=6).pack(fill=tk.X, pady=1)
+    ttk.Button(btn_frame_4, text=_("删除"), command=_del_pattern_4, width=6).pack(fill=tk.X, pady=1)
 
-    ttk.Label(main, text="示例：1 2 3 4 | 1_ 2_ 3_ 4_ | 1- 2 3", font=("", 9), foreground="gray").pack(anchor=tk.W)
-
-    ttk.Separator(main, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
-
-    # 预览区
-    ttk.Label(main, text="预览：").pack(anchor=tk.W)
-    preview_frame = ttk.Frame(main)
-    preview_frame.pack(fill=tk.BOTH, expand=True, pady=(2, 8))
-    preview_text = tk.Text(preview_frame, height=4, width=60, font=("Consolas", 10), wrap=tk.WORD, state=tk.DISABLED)
-    preview_text.pack(fill=tk.BOTH, expand=True)
-    preview_err_label = ttk.Label(main, text="", foreground="red", font=("", 9))
-    preview_err_label.pack(anchor=tk.W)
-
-    _preview_job: Optional[str] = None
+    ttk.Label(main, text=_("示例：1 2 3 4 | 1_ 2_ 3_ 4_ | 1- 2 3"), font=("", 9), foreground="gray").pack(anchor=tk.W)
 
     def _get_patterns():
         p3 = [listbox_3.get(i) for i in range(listbox_3.size())]
         p4 = [listbox_4.get(i) for i in range(listbox_4.size())]
         return p3, p4
-
-    def _update_preview():
-        nonlocal _preview_job
-        _preview_job = None
-        p3, p4 = _get_patterns()
-        ton = ton_entry.get().strip() or "0"
-        line, err = _generate_accompaniment_line(
-            get_content(), p3, p4, ton, base_dir or Path.cwd()
-        )
-        preview_text.config(state=tk.NORMAL)
-        preview_text.delete("1.0", tk.END)
-        if err:
-            preview_err_label.config(text=err)
-        else:
-            preview_err_label.config(text="")
-            preview_text.insert(tk.END, line or "")
-        preview_text.config(state=tk.DISABLED)
-
-    def _schedule_preview():
-        nonlocal _preview_job
-        if _preview_job:
-            dlg.after_cancel(_preview_job)
-        _preview_job = dlg.after(300, _update_preview)
 
     def _save_config():
         p3, p4 = _get_patterns()
@@ -196,27 +161,8 @@ def show_accompaniment_panel(
             cfg["patterns_4"] = p4
         save_accompaniment(workspace_root, current_filename, cfg)
 
-    def _on_apply():
-        _save_config()
-        p3, p4 = _get_patterns()
-        ton = ton_entry.get().strip() or "0"
-        err = _generate_and_insert_accompaniment(
-            get_content(), p3, p4, ton, base_dir or Path.cwd(), on_insert
-        )
-        if err:
-            messagebox.showerror("伴奏插入", err, parent=dlg)
-        else:
-            dlg.destroy()
-
-    btn_frame = ttk.Frame(main)
-    btn_frame.pack(fill=tk.X, pady=(0, 0))
-    ttk.Button(btn_frame, text="保存配置", command=_save_config).pack(side=tk.LEFT, padx=(0, 5))
-    ttk.Button(btn_frame, text="生成并插入伴奏", command=_on_apply).pack(side=tk.LEFT, padx=(0, 5))
-    ttk.Button(btn_frame, text="关闭", command=dlg.destroy).pack(side=tk.LEFT)
-
-    ton_entry.bind("<KeyRelease>", lambda e: _schedule_preview())
+    ton_entry.bind("<KeyRelease>", lambda e: _save_config())
     dlg.geometry(f"+{parent.winfo_rootx() + 80}+{parent.winfo_rooty() + 80}")
-    dlg.after(50, _update_preview)
 
 
 def _generate_accompaniment_line(
@@ -237,7 +183,7 @@ def _generate_accompaniment_line(
     from src.utils.accompaniment import parse_accompaniment_pattern, chord_parts_to_sorted_notation
 
     if not patterns_3 and not patterns_4:
-        return None, "请至少添加一个三音或四音和弦模式"
+        return None, _("请至少添加一个三音或四音和弦模式")
 
     try:
         expanded = expand_imports(content, base_dir)
@@ -247,7 +193,7 @@ def _generate_accompaniment_line(
     try:
         parse(expanded)
     except Exception as e:
-        return None, f"解析失败：{e}"
+        return None, _("解析失败：{e}").format(e=e)
 
     melody_tonality = get_tonality_offset(content)
     try:
@@ -262,21 +208,21 @@ def _generate_accompaniment_line(
 
     # 收集斜杠和弦 1/3/5 与 [V7]、[G7] 等和弦符号，按位置排序
     chord_items: list[tuple[int, int, list[str]]] = []
-    for _start, _end, tok in find_chords_in_range(expanded, 0, len(expanded)):
+    for c_start, c_end, tok in find_chords_in_range(expanded, 0, len(expanded)):
         parts = [p.strip() for p in tok.rstrip("_").split("/") if p.strip()]
         if len(parts) < 2 or len(parts) > 4:
             continue
         if not all(any(c in "1234567" for c in p.lstrip("~.#b^")) for p in parts):
             continue
-        chord_items.append((_start, _end, parts))
-    for _start, _end, symbol in find_chord_symbol_tokens(expanded, 0, len(expanded)):
+        chord_items.append((c_start, c_end, parts))
+    for s_start, s_end, symbol in find_chord_symbol_tokens(expanded, 0, len(expanded)):
         parts = parse_chord_symbol(symbol, total_tonality)
         if parts and 2 <= len(parts) <= 4:
-            chord_items.append((_start, _end, parts))
+            chord_items.append((s_start, s_end, parts))
     chord_items.sort(key=lambda x: x[0])
 
     acc_notes: list[str] = []
-    for _start, _end, parts in chord_items:
+    for _cstart, _cend, parts in chord_items:
         n = len(parts)
         if n == 4:
             pat_list = notes_4_list
@@ -302,7 +248,7 @@ def _generate_accompaniment_line(
                 acc_notes.append(s)
 
     if not acc_notes:
-        return None, "未在旋律中找到可伴奏的和弦（需 2–4 音的和弦，如 1/3/5 或 [V7]、[G7]）"
+        return None, _("未在旋律中找到可伴奏的和弦（需 2–4 音的和弦，如 1/3/5 或 [V7]、[G7]）")
 
     bar_size = min(8, max(4, len(acc_notes) // 2))
     bars = []

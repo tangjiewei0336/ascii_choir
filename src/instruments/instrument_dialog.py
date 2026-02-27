@@ -18,6 +18,7 @@ from src.instruments.instrument_registry import (
     parse_note_or_chord_input,
 )
 from src.audio.sound_loader import load_sound_library
+from src.utils.i18n import _
 
 # 乐器显示名
 INSTRUMENT_DISPLAY_NAMES = {
@@ -102,7 +103,7 @@ def show_instrument_dialog(
 ) -> None:
     """打开乐器面板对话框。insert_callback(text) 用于将文本插入编辑器光标处。tonality_offset 用于鼓声部简谱转换。"""
     dlg = tk.Toplevel(parent)
-    dlg.title("乐器面板")
+    dlg.title(_("乐器面板"))
     dlg.transient(parent)
     dlg.geometry("880x520")
     dlg.minsize(600, 400)
@@ -118,14 +119,14 @@ def show_instrument_dialog(
     left = ttk.Frame(paned, padding=(0, 5))
     paned.add(left, weight=1)
 
-    ttk.Label(left, text="乐器与音域", font=("", 11, "bold")).pack(anchor=tk.W)
+    ttk.Label(left, text=_("乐器与音域"), font=("", 11, "bold")).pack(anchor=tk.W)
 
     columns = ("instrument", "range", "min_midi", "max_midi")
     tree = ttk.Treeview(left, columns=columns, show="headings", height=12, selectmode="browse")
-    tree.heading("instrument", text="乐器")
-    tree.heading("range", text="音域")
-    tree.heading("min_midi", text="最低")
-    tree.heading("max_midi", text="最高")
+    tree.heading("instrument", text=_("乐器"))
+    tree.heading("range", text=_("音域"))
+    tree.heading("min_midi", text=_("最低"))
+    tree.heading("max_midi", text=_("最高"))
     tree.column("instrument", width=140)
     tree.column("range", width=100)
     tree.column("min_midi", width=50)
@@ -151,7 +152,7 @@ def show_instrument_dialog(
         info = instruments[name]
         lo, hi = info["min_midi"], info["max_midi"]
         range_str = f"{midi_to_note_name(lo)} - {midi_to_note_name(hi)}"
-        display_name = INSTRUMENT_DISPLAY_NAMES.get(name, name)
+        display_name = _(INSTRUMENT_DISPLAY_NAMES.get(name, name))
         tree.insert("", tk.END, values=(display_name, range_str, lo, hi), tags=(name,))
 
     # 试听、可弹（两行，降低横向占地）
@@ -159,19 +160,19 @@ def show_instrument_dialog(
     preview_frame.pack(fill=tk.X, pady=(5, 0))
     row1 = ttk.Frame(preview_frame)
     row1.pack(fill=tk.X, pady=(0, 2))
-    ttk.Label(row1, text="试听:").pack(side=tk.LEFT, padx=(0, 5))
+    ttk.Label(row1, text=_("试听:")).pack(side=tk.LEFT, padx=(0, 5))
     midi_var = tk.StringVar(value="C4")
     ttk.Entry(row1, textvariable=midi_var, width=8).pack(side=tk.LEFT, padx=(0, 5))
 
     def _on_preview():
         parsed = parse_note_or_chord_input(midi_var.get())
         if not parsed or len(parsed) != 1:
-            messagebox.showwarning("试听", "请输入单个 MIDI(21-108) 或音名(如 C4)", parent=dlg)
+            messagebox.showwarning(_("试听"), _("请输入单个 MIDI(21-108) 或音名(如 C4)"), parent=dlg)
             return
         midi = parsed[0]
         sel = tree.selection()
         if not sel:
-            messagebox.showinfo("试听", "请先选择乐器", parent=dlg)
+            messagebox.showinfo(_("试听"), _("请先选择乐器"), parent=dlg)
             return
         item = tree.item(sel[0])
         tags = item.get("tags", ())
@@ -190,18 +191,18 @@ def show_instrument_dialog(
                 if key in instruments:
                     path = instruments[key]["path"]
             else:
-                messagebox.showwarning("试听", f"吉他无法弹奏 MIDI {midi}", parent=dlg)
+                messagebox.showwarning(_("试听"), _("吉他无法弹奏 MIDI {midi}").format(midi=midi), parent=dlg)
                 return
         if not can_play_note(inst_id if inst_id != "guitar" else "guitar", midi):
-            messagebox.showwarning("试听", f"该乐器音域不包含 MIDI {midi}", parent=dlg)
+            messagebox.showwarning(_("试听"), _("该乐器音域不包含 MIDI {midi}").format(midi=midi), parent=dlg)
             return
         threading.Thread(target=lambda: _play_preview(path, midi), daemon=True).start()
 
-    ttk.Button(row1, text="▶ 试听", command=_on_preview).pack(side=tk.LEFT)
+    ttk.Button(row1, text=_("▶ 试听"), command=_on_preview).pack(side=tk.LEFT)
 
     row2 = ttk.Frame(preview_frame)
     row2.pack(fill=tk.X)
-    ttk.Label(row2, text="可弹:").pack(side=tk.LEFT, padx=(0, 5))
+    ttk.Label(row2, text=_("可弹:")).pack(side=tk.LEFT, padx=(0, 5))
     test_var = tk.StringVar(value="C4")
     ttk.Entry(row2, textvariable=test_var, width=10).pack(side=tk.LEFT, padx=(0, 5))
     result_label = ttk.Label(row2, text="", foreground="gray")
@@ -214,20 +215,20 @@ def show_instrument_dialog(
             return
         midis = parse_note_or_chord_input(raw)
         if midis is None:
-            result_label.config(text="格式错误", foreground="red")
+            result_label.config(text=_("格式错误"), foreground="red")
             return
         sel = tree.selection()
         if not sel:
-            result_label.config(text="请选乐器", foreground="orange")
+            result_label.config(text=_("请选乐器"), foreground="orange")
             return
         inst_id = tree.item(sel[0]).get("tags", ("",))[0]
         check = can_play_chord(inst_id, midis) if len(midis) > 1 else can_play_note(inst_id, midis[0])
-        result_label.config(text="✓ 可弹" if check else "✗ 不可弹", foreground="green" if check else "red")
+        result_label.config(text=_("✓ 可弹") if check else _("✗ 不可弹"), foreground="green" if check else "red")
 
-    ttk.Button(row2, text="检查", command=_on_check).pack(side=tk.LEFT)
+    ttk.Button(row2, text=_("检查"), command=_on_check).pack(side=tk.LEFT)
 
     # ========== 右侧：快捷插入 ==========
-    right = ttk.LabelFrame(paned, text="快捷插入", padding=8)
+    right = ttk.LabelFrame(paned, text=_("快捷插入"), padding=8)
     paned.add(right, weight=1)
 
     def _do_insert(text: str):
@@ -245,14 +246,14 @@ def show_instrument_dialog(
             tags = tree.item(sel[0]).get("tags", ())
             inst_id = tags[0] if tags else ""
         if not inst_id:
-            ttk.Label(right, text="请先在左侧选择乐器", foreground="gray").pack(expand=True)
+            ttk.Label(right, text=_("请先在左侧选择乐器"), foreground="gray").pack(expand=True)
             return
         if inst_id == "drums":
             # 鼓：插入简谱格式，用 Frame 模拟按钮以支持两行及可调高度（mac 原生按钮高度固定）
             row_top = ttk.Frame(right)
             row_top.pack(fill=tk.X)
-            ttk.Label(row_top, text="点击插入鼓音（简谱）:", font=("", 9)).pack(side=tk.LEFT, padx=(0, 10))
-            ttk.Checkbutton(row_top, text="仅试听", variable=preview_only_var).pack(side=tk.LEFT)
+            ttk.Label(row_top, text=_("点击插入鼓音（简谱）:"), font=("", 9)).pack(side=tk.LEFT, padx=(0, 10))
+            ttk.Checkbutton(row_top, text=_("仅试听"), variable=preview_only_var).pack(side=tk.LEFT)
             btn_frame = ttk.Frame(right)
             btn_frame.pack(fill=tk.BOTH, expand=True, pady=5)
             for c in range(4):
@@ -293,10 +294,10 @@ def show_instrument_dialog(
                 w.bind("<Button-1>", _click)
                 l1.bind("<Button-1>", _click)
                 l2.bind("<Button-1>", _click)
-            ttk.Button(right, text="插入 [drums]", command=lambda: _do_insert("[drums]")).pack(anchor=tk.W, pady=(5, 0))
+            ttk.Button(right, text=_("插入 [drums]"), command=lambda: _do_insert("[drums]")).pack(anchor=tk.W, pady=(5, 0))
         else:
             # 非鼓：列表插入乐器标记
-            ttk.Label(right, text="点击插入乐器标记:", font=("", 9)).pack(anchor=tk.W)
+            ttk.Label(right, text=_("点击插入乐器标记:"), font=("", 9)).pack(anchor=tk.W)
             btn_frame = ttk.Frame(right)
             btn_frame.pack(fill=tk.BOTH, expand=True, pady=5)
             for c in range(3):
@@ -306,7 +307,7 @@ def show_instrument_dialog(
                 btn_frame.rowconfigure(r, uniform="inst_row", minsize=28)
             for i, name in enumerate(names):
                 row, col = i // 3, i % 3
-                display_name = INSTRUMENT_DISPLAY_NAMES.get(name, name)
+                display_name = _(INSTRUMENT_DISPLAY_NAMES.get(name, name))
                 ttk.Button(
                     btn_frame, text=f"[{display_name}]", width=10,
                     command=lambda n=name: _do_insert(f"[{n}]"),
