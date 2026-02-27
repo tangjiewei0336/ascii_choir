@@ -3,7 +3,7 @@ venv/
 .venv/
 .tts_tmp.mp3
 .voicevox_preview.wav
-workspaces/**/.ascii_choir_breakpoints.json
+workspaces/**/.**
 **/.DS_Store
 .DS_Store
 sound_library/*.py

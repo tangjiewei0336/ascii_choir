@@ -27,15 +27,29 @@ from src.core.preprocessor import expand_imports
 from src.utils.renderer import render_to_image, render_to_pil
 from src.core.validator import validate, VOICEVOX_UNREACHABLE_MSG
 from src.utils.breakpoints import load_breakpoints, save_breakpoints, rename_breakpoints
+from src.utils.accompaniment import rename_accompaniment
 from src.voice.voicevox_client import VOICEVOX_BASE
 from src.ui.progress_window import ProgressWindow
 from src.ui.autocomplete import (
     get_backslash_suggestions,
     get_bracket_suggestions,
-    AutocompletePopup,
+    get_chord_completion_context,
+    get_chord_suggestions,
+    ChordAutocompletePopup,
 )
 from src.utils.bar_utils import get_bar_ranges_at_cursor, extract_single_bar_for_preview
 from src.utils.frozen_path import get_app_root
+from src.utils.i18n import _, get_language, set_language, SUPPORTED_LANGUAGES, LANGUAGE_LABELS
+
+
+def _extract_defines_map(text: str) -> dict[str, str]:
+    """提取 \\define{key}{value}，返回 {key: value}。同 key 后者覆盖。"""
+    result: dict[str, str] = {}
+    for m in re.finditer(r"\\define\{([^{}]+)\}\{([^{}]*)\}\s*", text, re.I):
+        key, val = m.group(1).strip(), m.group(2)
+        if key:
+            result[key] = val
+    return result
 
 
 def show_error_detail(parent: tk.Tk, title: str, message: str, traceback_str: str | None = None) -> None:
@@ -55,7 +69,7 @@ def show_error_detail(parent: tk.Tk, title: str, message: str, traceback_str: st
     txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
     txt.insert(tk.END, full)
     txt.config(state=tk.DISABLED)
-    ttk.Button(dlg, text="关闭", command=dlg.destroy).pack(pady=(0, 10))
+    ttk.Button(dlg, text=_("关闭"), command=dlg.destroy).pack(pady=(0, 10))
     dlg.geometry(f"+{parent.winfo_rootx() + 80}+{parent.winfo_rooty() + 120}")
 
 
@@ -71,7 +85,7 @@ def _ask_rename(prompt: str, initial: str, parent: tk.Tk) -> str | None:
         dlg.destroy()
 
     dlg = tk.Toplevel(parent)
-    dlg.title("重命名")
+    dlg.title(_("重命名"))
     dlg.transient(parent)
     dlg.grab_set()
     ttk.Label(dlg, text=prompt).pack(anchor=tk.W, padx=10, pady=(10, 0))
@@ -93,8 +107,8 @@ def _ask_rename(prompt: str, initial: str, parent: tk.Tk) -> str | None:
 
     btn_frame = ttk.Frame(dlg)
     btn_frame.pack(pady=(5, 10))
-    ttk.Button(btn_frame, text="确定", command=on_ok).pack(side=tk.LEFT, padx=5)
-    ttk.Button(btn_frame, text="取消", command=on_cancel).pack(side=tk.LEFT)
+    ttk.Button(btn_frame, text=_("确定"), command=on_ok).pack(side=tk.LEFT, padx=5)
+    ttk.Button(btn_frame, text=_("取消"), command=on_cancel).pack(side=tk.LEFT)
     entry.bind("<Return>", lambda e: on_ok())
     entry.bind("<Escape>", lambda e: on_cancel())
     dlg.protocol("WM_DELETE_WINDOW", on_cancel)
@@ -348,7 +362,7 @@ def _ensure_example_workspace() -> Path:
 class App:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("简谱演奏 - ASCII Choir")
+        self.root.title(_("简谱演奏 - ASCII Choir"))
         self.root.geometry("1280x720")
         self.root.minsize(700, 500)
         
@@ -369,54 +383,54 @@ class App:
         self.root.config(menu=menubar)
         
         file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="文件", menu=file_menu)
-        file_menu.add_command(label="新建", command=self._on_new, accelerator="Ctrl+N")
-        file_menu.add_command(label="打开...", command=self._on_open, accelerator="Ctrl+O")
-        file_menu.add_command(label="保存", command=self._on_save, accelerator="Ctrl+S")
-        file_menu.add_command(label="另存为...", command=self._on_save_as)
-        file_menu.add_command(label="导出带歌词简谱 (JPG)...", command=self._on_export_lyrics_jpg)
-        file_menu.add_command(label="导出为 MP3...", command=self._on_export_mp3)
+        menubar.add_cascade(label=_("文件"), menu=file_menu)
+        file_menu.add_command(label=_("新建"), command=self._on_new, accelerator="Ctrl+N")
+        file_menu.add_command(label=_("打开..."), command=self._on_open, accelerator="Ctrl+O")
+        file_menu.add_command(label=_("保存"), command=self._on_save, accelerator="Ctrl+S")
+        file_menu.add_command(label=_("另存为..."), command=self._on_save_as)
+        file_menu.add_command(label=_("导出带歌词简谱 (JPG)..."), command=self._on_export_lyrics_jpg)
+        file_menu.add_command(label=_("导出为 MP3..."), command=self._on_export_mp3)
         file_menu.add_separator()
-        file_menu.add_command(label="打开工作区...", command=self._on_open_workspace)
-        file_menu.add_command(label="打开示例工作区", command=self._on_open_example_workspace)
+        file_menu.add_command(label=_("打开工作区..."), command=self._on_open_workspace)
         file_menu.add_separator()
-        file_menu.add_command(label="退出", command=self._on_quit)
+        file_menu.add_command(label=_("退出"), command=self._on_quit)
         
         edit_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="编辑", menu=edit_menu)
+        menubar.add_cascade(label=_("编辑"), menu=edit_menu)
         undo_accel = "⌘Z" if sys.platform == "darwin" else "Ctrl+Z"
         redo_accel = "⌘⇧Z" if sys.platform == "darwin" else "Ctrl+Shift+Z"
-        edit_menu.add_command(label="撤销", command=self._on_undo, accelerator=undo_accel)
-        edit_menu.add_command(label="恢复", command=self._on_redo, accelerator=redo_accel)
+        edit_menu.add_command(label=_("撤销"), command=self._on_undo, accelerator=undo_accel)
+        edit_menu.add_command(label=_("恢复"), command=self._on_redo, accelerator=redo_accel)
         edit_menu.add_separator()
-        edit_menu.add_command(label="剪切", command=self._on_cut, accelerator="Ctrl+X")
-        edit_menu.add_command(label="复制", command=self._on_copy_selection, accelerator="Ctrl+C")
-        edit_menu.add_command(label="粘贴", command=self._on_paste, accelerator="Ctrl+V")
-        edit_menu.add_command(label="全选", command=self._on_select_all, accelerator="Ctrl+A")
+        edit_menu.add_command(label=_("剪切"), command=self._on_cut, accelerator="Ctrl+X")
+        edit_menu.add_command(label=_("复制"), command=self._on_copy_selection, accelerator="Ctrl+C")
+        edit_menu.add_command(label=_("粘贴"), command=self._on_paste, accelerator="Ctrl+V")
+        edit_menu.add_command(label=_("全选"), command=self._on_select_all, accelerator="Ctrl+A")
         edit_menu.add_separator()
         find_accel = "⌘F" if sys.platform == "darwin" else "Ctrl+F"
-        edit_menu.add_command(label="查找", command=self._on_find, accelerator=find_accel)
+        edit_menu.add_command(label=_("查找"), command=self._on_find, accelerator=find_accel)
         replace_accel = "⌘⌥F" if sys.platform == "darwin" else "Ctrl+H"
-        edit_menu.add_command(label="替换", command=self._on_find_replace, accelerator=replace_accel)
+        edit_menu.add_command(label=_("替换"), command=self._on_find_replace, accelerator=replace_accel)
         fmt_accel = "⌘⇧F" if sys.platform == "darwin" else "Ctrl+Shift+F"
-        edit_menu.add_command(label="格式化", command=self._on_format, accelerator=fmt_accel)
-        edit_menu.add_command(label="复制全部到剪贴板", command=self._on_copy_all, accelerator="Ctrl+Shift+C")
+        edit_menu.add_command(label=_("格式化"), command=self._on_format, accelerator=fmt_accel)
+        edit_menu.add_command(label=_("复制全部到剪贴板"), command=self._on_copy_all, accelerator="Ctrl+Shift+C")
 
         voice_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="音色", menu=voice_menu)
-        voice_menu.add_command(label="VOICEVOX 音色选择...", command=self._on_voicevox_voices)
-        voice_menu.add_command(label="VOICEVOX 音声模型管理...", command=self._on_voicevox_models)
-        voice_menu.add_command(label="乐器面板...", command=self._on_instrument_panel)
+        menubar.add_cascade(label=_("音色"), menu=voice_menu)
+        voice_menu.add_command(label=_("VOICEVOX 音色选择..."), command=self._on_voicevox_voices)
+        voice_menu.add_command(label=_("VOICEVOX 音声模型管理..."), command=self._on_voicevox_models)
+        voice_menu.add_command(label=_("乐器面板..."), command=self._on_instrument_panel)
 
         settings_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="设置", menu=settings_menu)
-        settings_menu.add_command(label="AI 设置...", command=self._on_ai_settings)
-        settings_menu.add_command(label="VOICEVOX 设置...", command=self._on_voicevox_settings)
-        settings_menu.add_command(label="缓存设置...", command=self._on_cache_settings)
+        menubar.add_cascade(label=_("设置"), menu=settings_menu)
+        settings_menu.add_command(label=_("AI 设置..."), command=self._on_ai_settings)
+        settings_menu.add_command(label=_("VOICEVOX 设置..."), command=self._on_voicevox_settings)
+        settings_menu.add_command(label=_("缓存设置..."), command=self._on_cache_settings)
+        settings_menu.add_command(label=_("语言..."), command=self._on_language_settings)
 
         help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="帮助", menu=help_menu)
-        help_menu.add_command(label="用法说明", command=self._on_help)
+        menubar.add_cascade(label=_("帮助"), menu=help_menu)
+        help_menu.add_command(label=_("用法说明"), command=self._on_help)
         
         self.root.bind("<Control-n>", lambda e: self._on_new())
         self.root.bind("<Control-o>", lambda e: self._on_open())
@@ -425,7 +439,7 @@ class App:
     
     def _on_new(self):
         """新建文件：先询问名称，然后直接保存"""
-        name = simpledialog.askstring("新建", "请输入文件名：", parent=self.root)
+        name = simpledialog.askstring(_("新建"), _("请输入文件名："), parent=self.root)
         if not name or not name.strip():
             return
         name = name.strip()
@@ -441,7 +455,7 @@ class App:
             path = self.workspace_root / name
         else:
             path = filedialog.asksaveasfilename(
-                title="保存新建文件",
+                title=_("保存新建文件"),
                 initialfile=name,
                 defaultextension=".choir",
                 filetypes=[("简谱文件", "*.choir *.txt"), ("所有文件", "*.*")],
@@ -455,7 +469,7 @@ class App:
     def _on_open(self):
         initialdir = str(self.current_file_path.parent) if self.current_file_path else None
         path = filedialog.askopenfilename(
-            title="打开简谱文件",
+            title=_("打开简谱文件"),
             initialdir=initialdir,
             filetypes=[("简谱文件", "*.choir *.txt"), ("所有文件", "*.*")],
         )
@@ -478,7 +492,7 @@ class App:
         initialdir = str(self.current_file_path.parent) if self.current_file_path else None
         initialfile = self.current_file_path.name if self.current_file_path else None
         path = filedialog.asksaveasfilename(
-            title="另存为",
+            title=_("另存为"),
             initialdir=initialdir,
             initialfile=initialfile,
             defaultextension=".choir",
@@ -629,12 +643,12 @@ class App:
     def _show_find_replace_dialog(self, focus_replace: bool = False):
         """显示查找/替换对话框（类似 VSCode）"""
         dlg = tk.Toplevel(self.root)
-        dlg.title("查找")
+        dlg.title(_("查找"))
         dlg.transient(self.root)
         dlg.resizable(True, False)
         main_f = ttk.Frame(dlg, padding=10)
         main_f.pack(fill=tk.X)
-        ttk.Label(main_f, text="查找:").grid(row=0, column=0, sticky=tk.W, pady=(0, 2))
+        ttk.Label(main_f, text=_("查找:")).grid(row=0, column=0, sticky=tk.W, pady=(0, 2))
         find_var = tk.StringVar()
         try:
             sel = self.text.get(tk.SEL_FIRST, tk.SEL_LAST)
@@ -644,13 +658,13 @@ class App:
             pass
         find_entry = ttk.Entry(main_f, textvariable=find_var, width=36)
         find_entry.grid(row=0, column=1, sticky=tk.EW, padx=(8, 0), pady=(0, 2))
-        ttk.Label(main_f, text="替换为:").grid(row=1, column=0, sticky=tk.W, pady=(0, 2))
+        ttk.Label(main_f, text=_("替换为:")).grid(row=1, column=0, sticky=tk.W, pady=(0, 2))
         replace_var = tk.StringVar()
         replace_entry = ttk.Entry(main_f, textvariable=replace_var, width=36)
         replace_entry.grid(row=1, column=1, sticky=tk.EW, padx=(8, 0), pady=(0, 2))
         main_f.columnconfigure(1, weight=1)
         case_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(main_f, text="区分大小写", variable=case_var).grid(row=2, column=1, sticky=tk.W, pady=(8, 0))
+        ttk.Checkbutton(main_f, text=_("区分大小写"), variable=case_var).grid(row=2, column=1, sticky=tk.W, pady=(8, 0))
         btn_f = ttk.Frame(main_f)
         btn_f.grid(row=3, column=0, columnspan=2, pady=(12, 0))
 
@@ -678,11 +692,11 @@ class App:
 
         def _on_find_next():
             if not _do_find(backward=False):
-                self.status_label.config(text="未找到")
+                self.status_label.config(text=_("未找到"))
 
         def _on_find_prev():
             if not _do_find(backward=True):
-                self.status_label.config(text="未找到")
+                self.status_label.config(text=_("未找到"))
 
         def _on_replace():
             needle = find_var.get()
@@ -720,15 +734,15 @@ class App:
             self._undo_separator()
             self._schedule_auto_save()
             self._schedule_preview()
-            self.status_label.config(text=f"已替换 {count} 处")
-            self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+            self.status_label.config(text=_("已替换 {count} 处").format(count=count))
+            self.root.after(2000, lambda: self.status_label.config(text=_("就绪")))
             dlg.destroy()
 
-        ttk.Button(btn_f, text="查找下一个", command=_on_find_next).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(btn_f, text="查找上一个", command=_on_find_prev).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(btn_f, text="替换", command=_on_replace).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(btn_f, text="全部替换", command=_on_replace_all).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(btn_f, text="关闭", command=dlg.destroy).pack(side=tk.LEFT)
+        ttk.Button(btn_f, text=_("查找下一个"), command=_on_find_next).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_f, text=_("查找上一个"), command=_on_find_prev).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_f, text=_("替换"), command=_on_replace).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_f, text=_("全部替换"), command=_on_replace_all).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_f, text=_("关闭"), command=dlg.destroy).pack(side=tk.LEFT)
         dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 120}")
         find_entry.focus_set()
         if focus_replace:
@@ -757,8 +771,8 @@ class App:
             self.root.clipboard_clear()
             self.root.clipboard_append(sel)
             self.root.update()
-            self.status_label.config(text="已复制")
-            self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+            self.status_label.config(text=_("已复制"))
+            self.root.after(2000, lambda: self.status_label.config(text=_("就绪")))
         except tk.TclError:
             pass  # 无选中内容
 
@@ -816,24 +830,24 @@ class App:
         has_two_note = any(len(c[2].rstrip("_").split("/")) == 2 for c in chords)
 
         menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="撤销", command=self._on_undo)
-        menu.add_command(label="重做", command=self._on_redo)
+        menu.add_command(label=_("撤销"), command=self._on_undo)
+        menu.add_command(label=_("重做"), command=self._on_redo)
         menu.add_separator()
-        menu.add_command(label="剪切", command=self._on_cut)
-        menu.add_command(label="复制", command=self._on_copy_selection)
-        menu.add_command(label="粘贴", command=self._on_paste)
+        menu.add_command(label=_("剪切"), command=self._on_cut)
+        menu.add_command(label=_("复制"), command=self._on_copy_selection)
+        menu.add_command(label=_("粘贴"), command=self._on_paste)
         menu.add_separator()
-        menu.add_command(label="全选", command=self._on_select_all)
+        menu.add_command(label=_("全选"), command=self._on_select_all)
         if chords:
             menu.add_separator()
             swap_state = tk.NORMAL if has_two_note else tk.DISABLED
-            menu.add_command(label="和弦：交换两音", command=self._on_chord_swap, state=swap_state)
-            menu.add_command(label="和弦：按音高升序", command=self._on_chord_sort_asc)
-            menu.add_command(label="和弦：按音高降序", command=self._on_chord_sort_desc)
+            menu.add_command(label=_("和弦：交换两音"), command=self._on_chord_swap, state=swap_state)
+            menu.add_command(label=_("和弦：按音高升序"), command=self._on_chord_sort_asc)
+            menu.add_command(label=_("和弦：按音高降序"), command=self._on_chord_sort_desc)
         menu.add_separator()
         dur_state = tk.NORMAL if (sel_start is not None and sel_end is not None) else tk.DISABLED
-        menu.add_command(label="时值÷2", command=self._on_duration_divide_two, state=dur_state)
-        menu.add_command(label="时值×2", command=self._on_duration_multiply_two, state=dur_state)
+        menu.add_command(label=_("时值÷2"), command=self._on_duration_divide_two, state=dur_state)
+        menu.add_command(label=_("时值×2"), command=self._on_duration_multiply_two, state=dur_state)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -845,8 +859,8 @@ class App:
         self.root.clipboard_clear()
         self.root.clipboard_append(content)
         self.root.update()
-        self.status_label.config(text="已复制全部到剪贴板")
-        self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+        self.status_label.config(text=_("已复制全部到剪贴板"))
+        self.root.after(2000, lambda: self.status_label.config(text=_("就绪")))
 
     def _get_selection_and_cursor(self) -> tuple[int | None, int | None, int | None]:
         """返回 (sel_start, sel_end, cursor_pos) 字符位置，0-based"""
@@ -961,19 +975,40 @@ class App:
             show_instrument_dialog(self.root, insert_callback=insert_cb, tonality_offset=tonality)
         except ImportError as e:
             import traceback
-            show_error_detail(self.root, "错误", f"无法加载乐器面板: {e}", traceback.format_exc())
+            show_error_detail(self.root, _("错误"), _("无法加载乐器面板: {e}").format(e=e), traceback.format_exc())
+
+    def _on_accompaniment_panel(self):
+        """打开伴奏辅助插入面板"""
+        try:
+            from src.ui.accompaniment_panel import show_accompaniment_panel
+            base_dir = (
+                self.workspace_root
+                if self.workspace_root and self.workspace_root.is_dir()
+                else (self.current_file_path.parent if self.current_file_path else None)
+            )
+            show_accompaniment_panel(
+                self.root,
+                workspace_root=self.workspace_root,
+                current_filename=self.current_file_path.name if self.current_file_path else None,
+                base_dir=base_dir,
+                get_content=lambda: self.text.get(1.0, tk.END),
+                on_insert=lambda s: self.text.insert(tk.INSERT, s),
+            )
+        except ImportError as e:
+            import traceback
+            show_error_detail(self.root, _("错误"), _("无法加载伴奏辅助: {e}").format(e=e), traceback.format_exc())
 
     def _on_help(self):
         """打开用法说明：左侧条目列表，右侧详细中文解释"""
         dlg = tk.Toplevel(self.root)
-        dlg.title("用法说明")
+        dlg.title(_("用法说明"))
         dlg.transient(self.root)
         dlg.geometry("720x480")
         main = ttk.Frame(dlg, padding=10)
         main.pack(fill=tk.BOTH, expand=True)
         content = ttk.Frame(main)
         content.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        left_frame = ttk.LabelFrame(content, text="条目", padding=5)
+        left_frame = ttk.LabelFrame(content, text=_("条目"), padding=5)
         left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
         left_scroll = ttk.Scrollbar(left_frame)
         left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -987,12 +1022,12 @@ class App:
         )
         lst.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         left_scroll.config(command=lst.yview)
-        for name, _, _ in HELP_ENTRIES:
-            lst.insert(tk.END, name)
+        for name, _ex, _detail in HELP_ENTRIES:
+            lst.insert(tk.END, _(name))
         lst.selection_set(0)
         lst.see(0)
 
-        right_frame = ttk.LabelFrame(content, text="详细说明", padding=5)
+        right_frame = ttk.LabelFrame(content, text=_("详细说明"), padding=5)
         right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         detail_txt = scrolledtext.ScrolledText(
             right_frame, wrap=tk.WORD, font=("", 11), height=22, width=55
@@ -1006,13 +1041,13 @@ class App:
                 name, example, detail = HELP_ENTRIES[sel[0]]
                 detail_txt.config(state=tk.NORMAL)
                 detail_txt.delete(1.0, tk.END)
-                detail_txt.insert(tk.END, f"{name}\n\n{detail}\n\n示例：\n{example}")
+                detail_txt.insert(tk.END, f"{_(name)}\n\n{_(detail)}\n\n{_('示例：')}\n{example}")
                 detail_txt.config(state=tk.DISABLED)
 
-        def _on_select(_=None):
+        def _on_select(event=None):
             sel = lst.curselection()
             if sel and sel[0] < len(HELP_ENTRIES):
-                _, example, _ = HELP_ENTRIES[sel[0]]
+                _name, example, _detail = HELP_ENTRIES[sel[0]]
                 self.text.insert(tk.INSERT, example)
                 dlg.destroy()
 
@@ -1023,17 +1058,17 @@ class App:
 
         btn_frame = ttk.Frame(main)
         btn_frame.pack(fill=tk.X)
-        ttk.Button(btn_frame, text="插入选中条目 (双击或回车)", command=_on_select).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(btn_frame, text=_("插入选中条目 (双击或回车)"), command=_on_select).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Separator(btn_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
-        ttk.Label(btn_frame, text="完整示例：").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(btn_frame, text=_("完整示例：")).pack(side=tk.LEFT, padx=(0, 5))
         for ex_name, ex_content in HELP_EXAMPLES.items():
             def _insert(c=ex_content):
                 self.text.delete(1.0, tk.END)
                 self.text.insert(tk.END, c)
                 self.text.edit_reset()
                 dlg.destroy()
-            ttk.Button(btn_frame, text=ex_name, command=_insert).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(main, text="关闭", command=dlg.destroy).pack(pady=(10, 0))
+            ttk.Button(btn_frame, text=_(ex_name), command=_insert).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(main, text=_("关闭"), command=dlg.destroy).pack(pady=(10, 0))
         dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 80}")
 
     def _on_ai_settings(self):
@@ -1119,43 +1154,79 @@ class App:
             )
             from src.voice.voicevox_client import clear_singers_cache
         except ImportError:
-            messagebox.showwarning("VOICEVOX 设置", "无法加载设置模块", parent=self.root)
+            messagebox.showwarning(_("VOICEVOX 设置"), _("无法加载设置模块"), parent=self.root)
             return
 
         dlg = tk.Toplevel(self.root)
-        dlg.title("VOICEVOX 设置")
+        dlg.title(_("VOICEVOX 设置"))
         dlg.transient(self.root)
         dlg.resizable(False, False)
 
         main = ttk.Frame(dlg, padding=15)
         main.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(main, text="VOICEVOX 后端：").pack(anchor=tk.W)
+        ttk.Label(main, text=_("VOICEVOX 后端：")).pack(anchor=tk.W)
         backend_var = tk.StringVar(value=get_voicevox_backend())
         backend_frame = ttk.Frame(main)
         backend_frame.pack(fill=tk.X, pady=(5, 10))
         for b in VOICEVOX_BACKENDS:
             ttk.Radiobutton(
                 backend_frame,
-                text=VOICEVOX_BACKEND_LABELS.get(b, b),
+                text=_(VOICEVOX_BACKEND_LABELS.get(b, b)),
                 variable=backend_var,
                 value=b,
             ).pack(side=tk.LEFT, padx=(0, 15))
 
-        ttk.Label(main, text="• 自动选择：本地库可用时优先使用，否则用 Docker\n• 本地库：需安装 voicevox_core 和音声模型（音色 → 音声模型管理）\n• Docker：需运行 voicevox_engine 容器（默认端口 50021）", font=("", 9), foreground="gray").pack(anchor=tk.W, pady=(0, 15))
+        ttk.Label(main, text=_("• 自动选择：本地库可用时优先使用，否则用 Docker\n• 本地库：需安装 voicevox_core 和音声模型（音色 → 音声模型管理）\n• Docker：需运行 voicevox_engine 容器（默认端口 50021）"), font=("", 9), foreground="gray").pack(anchor=tk.W, pady=(0, 15))
 
         def _on_ok():
             set_voicevox_backend(backend_var.get())
             clear_singers_cache()
-            messagebox.showinfo("保存", "已保存 VOICEVOX 设置", parent=dlg)
+            messagebox.showinfo(_("保存"), _("已保存 VOICEVOX 设置"), parent=dlg)
             dlg.destroy()
 
         btn_frame = ttk.Frame(main)
         btn_frame.pack(pady=(10, 0))
-        ttk.Button(btn_frame, text="确定", command=_on_ok).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="取消", command=dlg.destroy).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text=_("确定"), command=_on_ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text=_("取消"), command=dlg.destroy).pack(side=tk.LEFT)
 
         dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 80}")
+        dlg.grab_set()
+        dlg.focus_set()
+
+    def _on_language_settings(self):
+        """打开语言设置对话框"""
+        dlg = tk.Toplevel(self.root)
+        dlg.title(_("语言设置"))
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+
+        main = ttk.Frame(dlg, padding=15)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main, text=_("选择界面语言（重启后生效）")).pack(anchor=tk.W, pady=(0, 10))
+
+        lang_var = tk.StringVar(value=get_language())
+        for lang in SUPPORTED_LANGUAGES:
+            rb = ttk.Radiobutton(
+                main,
+                text=LANGUAGE_LABELS[lang],
+                variable=lang_var,
+                value=lang,
+            )
+            rb.pack(anchor=tk.W, pady=2)
+
+        def _on_ok():
+            set_language(lang_var.get())
+            messagebox.showinfo(_("设置"), _("语言设置已保存，重启后生效"), parent=dlg)
+            dlg.destroy()
+
+        btn_frame = ttk.Frame(main)
+        btn_frame.pack(pady=(15, 0))
+        ttk.Button(btn_frame, text=_("确定"), command=_on_ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text=_("取消"), command=dlg.destroy).pack(side=tk.LEFT)
+
+        dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 120}")
         dlg.grab_set()
         dlg.focus_set()
 
@@ -1169,23 +1240,23 @@ class App:
                 set_cache_size_limit_mb,
             )
         except ImportError:
-            messagebox.showwarning("缓存设置", "无法加载 audio_cache 模块", parent=self.root)
+            messagebox.showwarning(_("缓存设置"), _("无法加载 audio_cache 模块"), parent=self.root)
             return
 
         dlg = tk.Toplevel(self.root)
-        dlg.title("缓存设置")
+        dlg.title(_("缓存设置"))
         dlg.transient(self.root)
         dlg.resizable(False, False)
 
         main = ttk.Frame(dlg, padding=15)
         main.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(main, text="音频缓存用于加速重复播放，减少 VOICEVOX/TTS 调用。").pack(anchor=tk.W)
+        ttk.Label(main, text=_("音频缓存用于加速重复播放，减少 VOICEVOX/TTS 调用。")).pack(anchor=tk.W)
 
         # 当前缓存大小
         size_frame = ttk.Frame(main)
         size_frame.pack(fill=tk.X, pady=(10, 5))
-        ttk.Label(size_frame, text="当前缓存大小：").pack(side=tk.LEFT)
+        ttk.Label(size_frame, text=_("当前缓存大小：")).pack(side=tk.LEFT)
         size_var = tk.StringVar()
 
         def _refresh_size():
@@ -1197,20 +1268,20 @@ class App:
         # 缓存大小限制
         limit_frame = ttk.Frame(main)
         limit_frame.pack(fill=tk.X, pady=(10, 5))
-        ttk.Label(limit_frame, text="缓存大小限制（MB）：").pack(side=tk.LEFT)
+        ttk.Label(limit_frame, text=_("缓存大小限制（MB）：")).pack(side=tk.LEFT)
         limit_var = tk.StringVar(value=str(int(get_cache_size_limit_mb())))
         limit_entry = ttk.Entry(limit_frame, textvariable=limit_var, width=8)
         limit_entry.pack(side=tk.LEFT, padx=(5, 0))
-        ttk.Label(limit_frame, text="（超出后按最近使用时间逐出）").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(limit_frame, text=_("（超出后按最近使用时间逐出）")).pack(side=tk.LEFT, padx=(8, 0))
 
         # 清空缓存
         def _on_clear():
-            if messagebox.askyesno("确认", "确定要清空所有缓存吗？", parent=dlg):
+            if messagebox.askyesno(_("确认"), _("确定要清空所有缓存吗？"), parent=dlg):
                 n = clear_cache()
                 _refresh_size()
-                messagebox.showinfo("完成", f"已删除 {n} 个缓存文件", parent=dlg)
+                messagebox.showinfo(_("完成"), _("已删除 {n} 个缓存文件").format(n=n), parent=dlg)
 
-        btn_clear = ttk.Button(main, text="清空缓存", command=_on_clear)
+        btn_clear = ttk.Button(main, text=_("清空缓存"), command=_on_clear)
         btn_clear.pack(pady=(15, 0))
 
         # 确定/取消
@@ -1219,17 +1290,17 @@ class App:
                 mb = float(limit_var.get().strip())
                 if 10 <= mb <= 10000:
                     set_cache_size_limit_mb(mb)
-                    messagebox.showinfo("保存", "已保存设置", parent=dlg)
+                    messagebox.showinfo(_("保存"), _("已保存设置"), parent=dlg)
                     dlg.destroy()
                 else:
-                    messagebox.showwarning("输入错误", "请输入 10 ～ 10000 之间的数值", parent=dlg)
+                    messagebox.showwarning(_("输入错误"), _("请输入 10 ～ 10000 之间的数值"), parent=dlg)
             except ValueError:
-                messagebox.showwarning("输入错误", "请输入有效的数字", parent=dlg)
+                messagebox.showwarning(_("输入错误"), _("请输入有效的数字"), parent=dlg)
 
         btn_frame = ttk.Frame(main)
         btn_frame.pack(pady=(20, 0))
-        ttk.Button(btn_frame, text="确定", command=_on_ok).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="取消", command=dlg.destroy).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text=_("确定"), command=_on_ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text=_("取消"), command=dlg.destroy).pack(side=tk.LEFT)
 
         dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 120}")
         dlg.grab_set()
@@ -1241,11 +1312,6 @@ class App:
         path = filedialog.askdirectory(title="选择工作区文件夹", initialdir=str(default_dir))
         if path:
             self._set_workspace(Path(path))
-    
-    def _on_open_example_workspace(self):
-        """打开预设的示例工作区"""
-        _ensure_example_workspace()
-        self._set_workspace(EXAMPLE_WORKSPACE)
     
     def _load_file(self, path: Path):
         try:
@@ -1294,8 +1360,8 @@ class App:
                 base = self._get_breakpoint_base_dir()
                 self._breakpoints = set(load_breakpoints(base, path.name)) if base else set()
             if not silent:
-                self.status_label.config(text="已保存")
-                self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+                self.status_label.config(text=_("已保存"))
+                self.root.after(2000, lambda: self.status_label.config(text=_("就绪")))
             if self.workspace_root and path.parent == self.workspace_root:
                 self._refresh_workspace_list()
         except PermissionError as e:
@@ -1329,7 +1395,7 @@ class App:
     def _set_workspace(self, path: Path):
         self.workspace_root = path
         name = path.name if path else ""
-        self._workspace_frame.config(text=f"工作区: {name}")
+        self._workspace_frame.config(text=_("工作区: {name}").format(name=name))
         self._refresh_workspace_list()
         _save_last_workspace(path)
         # 切换工作区时加载该工作区上次打开的文件，否则加载第一个（仅当编辑器已创建时）
@@ -1442,8 +1508,8 @@ class App:
         self._workspace_list.selection_clear(0, tk.END)
         self._workspace_list.selection_set(idx)
         menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="重命名", command=lambda: self._on_workspace_rename(idx))
-        menu.add_command(label="删除", command=lambda: self._on_workspace_delete(idx))
+        menu.add_command(label=_("重命名"), command=lambda: self._on_workspace_rename(idx))
+        menu.add_command(label=_("删除"), command=lambda: self._on_workspace_delete(idx))
         menu.tk_popup(event.x_root, event.y_root)
 
     def _on_workspace_rename(self, idx: int):
@@ -1469,13 +1535,14 @@ class App:
             base = self._get_breakpoint_base_dir()
             if base:
                 rename_breakpoints(base, old_path.name, new_path.name)
+                rename_accompaniment(base, old_path.name, new_path.name)
             if self.current_file_path == old_path:
                 self.current_file_path = new_path
                 self._breakpoints = set(load_breakpoints(base, new_path.name)) if base else set()
                 self.root.title(f"简谱演奏 - {new_path.name}")
             self._refresh_workspace_list()
-            self.status_label.config(text="已重命名")
-            self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+            self.status_label.config(text=_("已重命名"))
+            self.root.after(2000, lambda: self.status_label.config(text=_("就绪")))
         except Exception as e:
             import traceback
             show_error_detail(self.root, "重命名失败", str(e), traceback.format_exc())
@@ -1496,8 +1563,8 @@ class App:
                 self.text.edit_reset()
                 self.root.title("简谱演奏 - 未命名")
             self._refresh_workspace_list()
-            self.status_label.config(text="已删除")
-            self.root.after(2000, lambda: self.status_label.config(text="就绪"))
+            self.status_label.config(text=_("已删除"))
+            self.root.after(2000, lambda: self.status_label.config(text=_("就绪")))
         except Exception as e:
             import traceback
             show_error_detail(self.root, "删除失败", str(e), traceback.format_exc())
@@ -1512,12 +1579,12 @@ class App:
         main_container.pack(fill=tk.BOTH, expand=True)
         
         # 左侧工作区面板
-        ws_title = "工作区"
+        ws_title = _("工作区")
         self._workspace_frame = ttk.LabelFrame(main_container, text=ws_title, padding=5)
         self._workspace_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
         ttk.Button(
             self._workspace_frame,
-            text="打开工作区...",
+            text=_("打开工作区..."),
             command=self._on_open_workspace,
         ).pack(fill=tk.X, pady=(0, 5))
         self._workspace_list = tk.Listbox(
@@ -1561,7 +1628,7 @@ class App:
             self._workspace_list.selection_set(idx)
             if target.exists():
                 self.current_file_path = target
-                self.root.title(f"简谱演奏 - {target.name}")
+                self.root.title(f"{_('简谱演奏 - ASCII Choir').split(' - ')[0]} - {target.name}")
                 _save_last_file_in_workspace(self.workspace_root, target)
         
         # 右侧主内容区
@@ -1572,33 +1639,32 @@ class App:
         toolbar = ttk.Frame(main)
         toolbar.pack(fill=tk.X, pady=(0, 5))
         
-        self.btn_play = ttk.Button(toolbar, text="▶ 播放", command=self._on_play)
+        self.btn_play = ttk.Button(toolbar, text=_("▶ 播放"), command=self._on_play)
         self.btn_play.pack(side=tk.LEFT, padx=(0, 5))
-        self.btn_play_segment = ttk.Button(toolbar, text="▶ A-B 区间", command=self._on_play_segment)
+        self.btn_play_segment = ttk.Button(toolbar, text=_("▶ A-B 区间"), command=self._on_play_segment)
         self.btn_play_segment.pack(side=tk.LEFT, padx=(0, 5))
         
-        self.btn_stop = ttk.Button(toolbar, text="■ 停止", command=self._on_stop, state=tk.DISABLED)
+        self.btn_stop = ttk.Button(toolbar, text=_("■ 停止"), command=self._on_stop, state=tk.DISABLED)
         self.btn_stop.pack(side=tk.LEFT, padx=(0, 5))
         
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
 
-        self.btn_duration_divide = ttk.Button(toolbar, text="时值÷2", command=self._on_duration_divide_two, state=tk.DISABLED)
+        self.btn_duration_divide = ttk.Button(toolbar, text=_("时值÷2"), command=self._on_duration_divide_two, state=tk.DISABLED)
         self.btn_duration_divide.pack(side=tk.LEFT, padx=(0, 2))
-        self.btn_duration_multiply = ttk.Button(toolbar, text="时值×2", command=self._on_duration_multiply_two, state=tk.DISABLED)
+        self.btn_duration_multiply = ttk.Button(toolbar, text=_("时值×2"), command=self._on_duration_multiply_two, state=tk.DISABLED)
         self.btn_duration_multiply.pack(side=tk.LEFT, padx=(0, 5))
 
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
 
-        self.btn_voicevox = ttk.Button(toolbar, text="VOICEVOX 音色", command=self._on_voicevox_voices)
+        self.btn_voicevox = ttk.Button(toolbar, text=_("VOICEVOX 音色"), command=self._on_voicevox_voices)
         self.btn_voicevox.pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(toolbar, text="乐器面板", command=self._on_instrument_panel).pack(side=tk.LEFT, padx=(0, 5))
-        
-        ttk.Button(toolbar, text="打开示例工作区", command=self._on_open_example_workspace).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(toolbar, text=_("乐器面板"), command=self._on_instrument_panel).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(toolbar, text=_("伴奏辅助"), command=self._on_accompaniment_panel).pack(side=tk.LEFT, padx=(0, 5))
         
         self.auto_wrap_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             toolbar,
-            text="行超宽时 " + ("⌘⇧F" if sys.platform == "darwin" else "Ctrl+Shift+F") + " 自动换新篇章",
+            text=_("行超宽时 " + ("⌘⇧F" if sys.platform == "darwin" else "Ctrl+Shift+F") + " 自动换新篇章"),
             variable=self.auto_wrap_var,
         ).pack(side=tk.LEFT, padx=(15, 0))
         
@@ -1612,14 +1678,14 @@ class App:
         # 状态栏（PyCharm 风格）：左侧状态、右侧行列/拍数、右下角可嵌入进度条
         self.status_frame = ttk.Frame(main)
         self.status_frame.pack(fill=tk.X)
-        self.status_label = ttk.Label(self.status_frame, text="就绪")
+        self.status_label = ttk.Label(self.status_frame, text=_("就绪"))
         self.status_label.pack(side=tk.LEFT)
-        self.status_bar = ttk.Label(self.status_frame, text="行: 1  列: 1  |  总拍: —  小节: —")
+        self.status_bar = ttk.Label(self.status_frame, text=_("行: 1  列: 1  |  总拍: —  小节: —"))
         self.status_bar.pack(side=tk.RIGHT)
         self._status_progress_frame: ttk.Frame | None = None  # 播放阶段嵌入的进度条
         
         # 编辑区（左侧行号 + 正文）
-        ttk.Label(main, text="简谱输入（支持 \\tonality、\\beat、\\bpm、\\reverb、\\no_bar_check）:").pack(anchor=tk.W)
+        ttk.Label(main, text=_("简谱输入（支持 \\tonality、\\beat、\\bpm、\\reverb、\\no_bar_check）:")).pack(anchor=tk.W)
         colors = self._theme_colors()
         editor_frame = ttk.Frame(main)
         editor_frame.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -1685,7 +1751,7 @@ class App:
         self.text.bind("<Leave>", self._on_text_leave)
 
         # 实时预览面板（带歌词简谱）
-        self._preview_frame = ttk.LabelFrame(main, text="带歌词简谱预览", padding=5)
+        self._preview_frame = ttk.LabelFrame(main, text=_("带歌词简谱预览"), padding=5)
         self._preview_frame.pack(fill=tk.BOTH, expand=False, pady=(5, 0))
         self._preview_canvas = tk.Canvas(
             self._preview_frame,
@@ -1790,7 +1856,7 @@ class App:
         self._diag_header.pack(fill=tk.X)
         self._diag_toggle_btn = ttk.Button(
             self._diag_header,
-            text="▶ 错误与警告 (0)",
+            text=_("▶ 错误与警告 (0)"),
             command=self._toggle_diagnostics,
         )
         self._diag_toggle_btn.pack(side=tk.LEFT)
@@ -1825,7 +1891,7 @@ class App:
         self._highlight_timer = None
         self._diag_timer = None  # 诊断单独防抖，避免 validate() 在每次高亮时执行
         self._auto_save_timer = None
-        self._autocomplete_popup: AutocompletePopup | None = None
+        self._autocomplete_popup: ChordAutocompletePopup | None = None
         self._autocomplete_timer = None
         self._command_held = False
         self._bar_mouse_pos: tuple[int, int] | None = None
@@ -2234,12 +2300,12 @@ class App:
         line_no = self._breakpoint_line_at_y(event.y)
         if line_no is None or line_no not in self._breakpoints:
             self._hide_bp_tooltip()
-            self.status_label.config(text="点击行左侧设置 A、B 断点（最多 2 个）")
+            self.status_label.config(text=_("点击行左侧设置 A、B 断点（最多 2 个）"))
             return
         bp_list = sorted(self._breakpoints)
         idx = bp_list.index(line_no)
         label = "A" if idx == 0 else "B"
-        text = f"{label} 断点（第 {line_no} 行）"
+        text = _("{label} 断点（第 {line} 行）").format(label=label, line=line_no)
         self.status_label.config(text=text)
         ev_x, ev_y = event.x, event.y
 
@@ -2295,7 +2361,7 @@ class App:
         """离开断点 gutter 时恢复状态栏并隐藏悬浮提示"""
         self._hide_bp_tooltip()
         if not self.is_playing:
-            self.status_label.config(text="就绪")
+            self.status_label.config(text=_("就绪"))
         self._update_status_bar()
 
     def _parse_hover_token(self, content: str, char_pos: int) -> tuple[str, int] | None:
@@ -2312,27 +2378,27 @@ class App:
                         key = m.group(1).lower()
                         if key == "bpm" and m.group(2):
                             val = m.group(2)[1:-1]
-                            return (f"BPM: {val}", -1)
+                            return (_("BPM: {val}").format(val=val), -1)
                         if key == "tonality" and m.group(2):
                             val = m.group(2)[1:-1]
-                            return (f"调性: {val}", -1)
+                            return (_("调性: {val}").format(val=val), -1)
                         if key == "beat" and m.group(2):
                             val = m.group(2)[1:-1]
-                            return (f"拍号: {val}", -1)
+                            return (_("拍号: {val}").format(val=val), -1)
                         if key == "no_bar_check":
-                            return ("禁用小节时值检查", -1)
+                            return (_("禁用小节时值检查"), -1)
                         return (f"\\{key}", -1)
                 # \lyrics{...}{part}{voice_id}{melody} 或 \tts{...}{lang}{voice_id}
                 for m in re.finditer(r"\\lyrics\s*\{[^{}]*\}\s*\{[^{}]*\}\s*\{([^{}]+)\}", line, re.I):
                     if m.start(1) <= col <= m.end(1):
                         vid = m.group(1).strip()
                         if vid.isdigit():
-                            return (f"歌词音色 ID: {vid}", int(vid))
+                            return (_("歌词音色 ID: {vid}").format(vid=vid), int(vid))
                 for m in re.finditer(r"\\tts\s*\{[^{}]*\}\s*\{[^{}]*\}\s*\{([^{}]+)\}", line, re.I):
                     if m.start(1) <= col <= m.end(1):
                         vid = m.group(1).strip()
                         if vid.isdigit():
-                            return (f"TTS 音色 ID: {vid}", int(vid))
+                            return (_("TTS 音色 ID: {vid}").format(vid=vid), int(vid))
                 break
             offset += line_len
         return None
@@ -2538,7 +2604,7 @@ class App:
     def _update_diag_header(self):
         count = self._diag_list.size()
         arrow = "▼" if self._diag_expanded else "▶"
-        self._diag_toggle_btn.config(text=f"{arrow} 错误与警告 ({count})")
+        self._diag_toggle_btn.config(text=f"{arrow} {_('错误与警告')} ({count})")
 
     def _on_global_drop_check(self, event=None):
         """全局 ButtonRelease：从工作区拖到输入框时，释放事件会发给 Listbox，需在此处理"""
@@ -2674,7 +2740,7 @@ class App:
         self.btn_play.config(state=tk.DISABLED)
         self.btn_play_segment.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
-        self.status_label.config(text="预览小节...")
+        self.status_label.config(text=_("预览小节..."))
         self._preview_play_id += 1
         play_id = self._preview_play_id
 
@@ -2737,7 +2803,7 @@ class App:
             bar_count = sum(len(s[0].bars) for s in score.sections) if score.sections else len(part0.bars)
             beats_str = f"{total_beats:.1f}"
             bars_str = str(bar_count)
-        self.status_bar.config(text=f"行: {line}  列: {col}  |  总拍: {beats_str}  小节: {bars_str}")
+        self.status_bar.config(text=_("行: {line}  列: {col}  |  总拍: {beats_str}  小节: {bars_str}").format(line=line, col=col, beats_str=beats_str, bars_str=bars_str))
 
     def _update_diagnostics(self):
         """根据当前文本更新诊断列表，并应用红/黄波浪线高亮"""
@@ -3043,70 +3109,158 @@ class App:
                 trigger_pos = i
                 break
 
-        if trigger_char is None or trigger_pos < 0:
-            if self._autocomplete_popup:
-                self._autocomplete_popup.close()
+        if trigger_char is not None and trigger_pos >= 0:
+            # 已有 \ 或 [ 触发，使用原有补全（仅当与光标同「行内」时，否则尝试和弦补全）
+            prefix = before[trigger_pos + 1 :]
+            if "\n" in prefix or "|" in prefix:
+                # 换行或小节线后的输入，不算 \ 或 [ 触发，fall through 到和弦补全
+                trigger_char = None
+            elif trigger_char == "\\" and "{" in prefix:
+                if self._autocomplete_popup:
+                    self._autocomplete_popup.close()
+                    self._autocomplete_popup = None
+                return
+            elif trigger_char == "[" and "]" in prefix:
+                # [Cmaj] 后输入字母应触发和弦补全，而非 [ 补全，fall through
+                trigger_char = None
+
+        if trigger_char is not None and trigger_pos >= 0:
+            # \ 或 [ 触发有效，使用原有补全
+            prefix = before[trigger_pos + 1 :]
+            base_dir = (
+                self.workspace_root
+                if self.workspace_root and self.workspace_root.is_dir()
+                else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+            )
+            if trigger_char == "\\":
+                suggestions = get_backslash_suggestions(prefix)
+            else:
+                suggestions = get_bracket_suggestions(
+                    prefix, content, base_dir,
+                    current_filename=self.current_file_path.name if self.current_file_path else None,
+                )
+            if not suggestions:
+                if self._autocomplete_popup:
+                    self._autocomplete_popup.close()
+                    self._autocomplete_popup = None
+                return
+            def on_select(insert_val: str, cursor_offset: int | None = None):
+                start_idx = f"1.0+{trigger_pos}c"
+                end_idx = "insert"
+                self.text.delete(start_idx, end_idx)
+                self.text.insert(start_idx, insert_val)
+                if cursor_offset is not None and cursor_offset > 0:
+                    self.text.mark_set("insert", f"{start_idx}+{len(insert_val) - cursor_offset}c")
+                if self._autocomplete_popup:
+                    self._autocomplete_popup.close()
+                    self._autocomplete_popup = None
+
+            def on_close():
                 self._autocomplete_popup = None
+
+            if self._autocomplete_popup:
+                self._autocomplete_popup.update_suggestions(suggestions, prefix)
+            else:
+                self._autocomplete_popup = ChordAutocompletePopup(
+                    self.root,
+                    self.text,
+                    suggestions,
+                    trigger_pos,
+                    prefix,
+                    on_select,
+                    on_close=on_close,
+                )
             return
 
-        prefix = before[trigger_pos + 1 :]
-        if trigger_char == "\\" and "{" in prefix:
-            if self._autocomplete_popup:
-                self._autocomplete_popup.close()
-                self._autocomplete_popup = None
-            return
-        if trigger_char == "[" and "]" in prefix:
-            if self._autocomplete_popup:
-                self._autocomplete_popup.close()
-                self._autocomplete_popup = None
-            return
+        # 和弦补全：输入字母时触发（可插入 [chord] 或 \define{chord}{展开内容}）
+        chord_ctx = get_chord_completion_context(content, cursor_pos)
+        if chord_ctx:
+            trigger_pos, prefix, inside_brackets = chord_ctx
+            tonality = get_tonality_offset(content)
+            base_dir = (
+                self.workspace_root
+                if self.workspace_root and self.workspace_root.is_dir()
+                else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+            )
+            suggestions = get_chord_suggestions(
+                prefix,
+                tonality_offset=tonality,
+                workspace_root=self.workspace_root,
+                current_filename=self.current_file_path.name if self.current_file_path else None,
+                base_dir=base_dir,
+                insert_as_define=not inside_brackets,  # 在 [ 内只插和弦，否则插 define + [chord]
+            )
+            if suggestions:
+                def on_select(insert_val: str, cursor_offset: int | None = None):
+                    # 使用当前光标位置作为删除结束，避免用户继续输入后 len(prefix) 过时导致多余字符
+                    cursor_pos_now = len(self.text.get("1.0", "insert"))
+                    if insert_val.startswith("\\define"):
+                        # define 插入到文件头部；若已存在同名但不同内容，用 chord_1、chord_2 等
+                        m = re.match(r"\\define\{([^{}]+)\}\{([^{}]*)\}", insert_val)
+                        chord = m.group(1) if m else ""
+                        new_content = m.group(2) if m and m.lastindex >= 2 else ""
+                        content_before = self.text.get("1.0", tk.END)
+                        existing = _extract_defines_map(content_before)
+                        final_chord = chord
+                        if chord in existing:
+                            if existing[chord] == new_content:
+                                pass  # 完全相同，不插 define
+                            else:
+                                for k in range(1, 100):
+                                    cand = f"{chord}_{k}"
+                                    if cand not in existing or existing[cand] == new_content:
+                                        final_chord = cand
+                                        break
+                        define_line = f"\\define{{{final_chord}}}{{{new_content}}}\n"
+                        if f"\\define{{{final_chord}}}{{{new_content}}}" not in content_before:
+                            self.text.insert("1.0", define_line)
+                            head_len = len(define_line)
+                        else:
+                            head_len = 0
+                        bracket_val = f"[{final_chord}]"
+                        start_idx = f"1.0+{trigger_pos + head_len}c"
+                        end_idx = f"1.0+{cursor_pos_now + head_len}c"
+                        self.text.delete(start_idx, end_idx)
+                        self.text.insert(start_idx, bracket_val)
+                        self.text.mark_set("insert", f"{start_idx}+{len(bracket_val)}c")
+                    elif inside_brackets and insert_val.startswith("[") and insert_val.endswith("]"):
+                        val = insert_val[1:-1]
+                        start_idx = f"1.0+{trigger_pos}c"
+                        end_idx = "insert"
+                        self.text.delete(start_idx, end_idx)
+                        self.text.insert(start_idx, val)
+                    else:
+                        val = insert_val
+                        start_idx = f"1.0+{trigger_pos}c"
+                        end_idx = "insert"
+                        self.text.delete(start_idx, end_idx)
+                        self.text.insert(start_idx, val)
+                        if cursor_offset is not None and cursor_offset > 0:
+                            self.text.mark_set("insert", f"{start_idx}+{len(val) - cursor_offset}c")
+                    if self._autocomplete_popup:
+                        self._autocomplete_popup.close()
+                        self._autocomplete_popup = None
 
-        base_dir = (
-            self.workspace_root
-            if self.workspace_root and self.workspace_root.is_dir()
-            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
-        )
+                def on_close():
+                    self._autocomplete_popup = None
 
-        if trigger_char == "\\":
-            suggestions = get_backslash_suggestions(prefix)
-        else:
-            suggestions = get_bracket_suggestions(prefix, content, base_dir)
-
-        if not suggestions:
-            if self._autocomplete_popup:
-                self._autocomplete_popup.close()
-                self._autocomplete_popup = None
-            return
-
-        def on_select(insert_val: str, cursor_offset: int | None = None):
-            start_idx = f"1.0+{trigger_pos}c"
-            end_idx = "insert"
-            self.text.delete(start_idx, end_idx)
-            self.text.insert(start_idx, insert_val)
-            if cursor_offset is not None and cursor_offset > 0:
-                self.text.mark_set("insert", f"{start_idx}+{len(insert_val) - cursor_offset}c")
-            if self._autocomplete_popup:
-                self._autocomplete_popup.close()
-                self._autocomplete_popup = None
-
-        def on_close():
-            self._autocomplete_popup = None
+                if self._autocomplete_popup:
+                    self._autocomplete_popup.update_suggestions(suggestions, prefix)
+                else:
+                    self._autocomplete_popup = ChordAutocompletePopup(
+                        self.root,
+                        self.text,
+                        suggestions,
+                        trigger_pos,
+                        prefix,
+                        on_select,
+                        on_close=on_close,
+                    )
+                return
 
         if self._autocomplete_popup:
-            self._autocomplete_popup.update_suggestions(suggestions)
-            self._autocomplete_popup.prefix = prefix
-            self._autocomplete_popup.on_select = on_select
-            self._autocomplete_popup.on_close = on_close
-        else:
-            self._autocomplete_popup = AutocompletePopup(
-                self.root,
-                self.text,
-                suggestions,
-                trigger_pos,
-                prefix,
-                on_select,
-                on_close=on_close,
-            )
+            self._autocomplete_popup.close()
+            self._autocomplete_popup = None
 
     def _on_autocomplete_nav(self, event):
         """补全弹窗打开时，Up/Down 选择候选"""
@@ -3230,7 +3384,7 @@ class App:
         self.btn_play_segment.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
         self.progress_var.set(0)
-        self.status_label.config(text="播放 A-B 区间...")
+        self.status_label.config(text=_("播放 A-B 区间..."))
         self._playback_progress_ui_switched = False
 
         self._progress_win = ProgressWindow(self.root, title="生成进度", status_frame=self.status_frame)
@@ -3327,7 +3481,7 @@ class App:
         self.btn_play.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
         self.progress_var.set(0)
-        self.status_label.config(text="播放中...")
+        self.status_label.config(text=_("播放中..."))
         self._playback_progress_ui_switched = False
 
         self._progress_win = ProgressWindow(self.root, title="生成进度", status_frame=self.status_frame)
@@ -3452,7 +3606,7 @@ class App:
         self.btn_play_segment.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)
         self.progress_var.set(0)
-        self.status_label.config(text="预览完成")
+        self.status_label.config(text=_("预览完成"))
         self._hide_status_progress()
 
     def _on_play_finished(self):
@@ -3462,7 +3616,7 @@ class App:
         self.btn_play_segment.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)
         self.progress_var.set(100)
-        self.status_label.config(text="播放完成")
+        self.status_label.config(text=_("播放完成"))
         self._hide_status_progress()
         aid = getattr(self, "_progress_show_after_id", None)
         if aid is not None:
@@ -3477,7 +3631,7 @@ class App:
     
     def _on_stop(self):
         self.player.stop()
-        self.status_label.config(text="已停止")
+        self.status_label.config(text=_("已停止"))
     
     def run(self):
         def _grab_focus():
@@ -3488,6 +3642,8 @@ class App:
 
 
 def main():
+    from src.utils.i18n import _init_lang
+    _init_lang()
     app = App()
     app.run()
 
