@@ -3,7 +3,8 @@
 """
 import re
 
-from src.core.parser import _parse_global, _split_sections
+from src.core.parser import _parse_global, _split_sections, parse
+from src.core.scheduler import schedule_segments
 
 
 def _pipe_positions_at_depth_zero(line: str) -> list[int]:
@@ -22,6 +23,149 @@ def _pipe_positions_at_depth_zero(line: str) -> list[int]:
         elif c == "|" and depth_bracket == 0:
             positions.append(i)
     return positions
+
+
+# TTS 时长估算：约 0.25 秒/字符（中文/日文）
+_TTS_SEC_PER_CHAR = 0.12
+
+
+def build_playback_timeline(content: str) -> list[tuple[float, float, float, int, int, list[int]]] | None:
+    """
+    解析并调度，构建播放时间轴。考虑篇章间 TTS 时长。
+    返回 [(t, tts_dur, music_dur, content_start, content_end, pipes), ...]，失败返回 None。
+    用最后一声部，确保多声部时滚动能显示全部；pipes 用于按小节均分时长。
+    """
+    try:
+        parsed = parse(content)
+        segments = schedule_segments(parsed)
+    except Exception:
+        return None
+    if not segments:
+        return None
+    try:
+        _, rest = _parse_global(content)
+    except Exception:
+        return None
+    rest_start = content.find(rest) if rest and rest in content else 0
+    sections_raw = _split_sections(rest)
+    # 构建 section -> (content_start, content_end, pipes) 映射；用最后一声部确保多声部时滚动能显示全部
+    section_info: list[tuple[int, int, list[int]]] = []
+    for block, part_lines in sections_raw:
+        if not part_lines:
+            continue
+        block_in_rest = rest.find(block, 0)
+        if block_in_rest < 0:
+            block_in_rest = 0
+        block_abs_start = rest_start + block_in_rest
+        last_line = part_lines[-1]
+        part_line_offset = block.find(last_line, 0)
+        if part_line_offset < 0:
+            part_line_offset = 0
+        abs_start = block_abs_start + part_line_offset
+        pipes = _pipe_positions_at_depth_zero(last_line)
+        section_info.append((abs_start, abs_start + len(last_line), pipes))
+    # (t, tts_dur, music_dur, content_start, content_end, pipes)
+    timeline: list[tuple[float, float, float, int, int, list[int]]] = []
+    t = 0.0
+    seg_idx = 0
+    for seg in segments:
+        tts_dur = sum(len(getattr(tts, "text", "") or "") * _TTS_SEC_PER_CHAR for tts in seg.tts_before)
+        music_dur = 0.0
+        if seg.notes:
+            music_dur = max(n.start_time + n.duration for n in seg.notes)
+        sec_idx = getattr(seg, "section_index", seg_idx)
+        if sec_idx < len(section_info):
+            content_start, content_end, pipes = section_info[sec_idx]
+        elif section_info:
+            content_start, content_end, pipes = section_info[-1]
+        else:
+            content_start, content_end, pipes = 0, len(content), []
+        timeline.append((t, tts_dur, music_dur, content_start, content_end, pipes))
+        t += tts_dur + music_dur
+        seg_idx += 1
+    return timeline
+
+
+def get_position_for_progress(
+    content: str,
+    progress: float,
+    timeline: list[tuple[float, float, float, int, int, list[int]]] | None = None,
+    actual_total: float | None = None,
+) -> int:
+    """
+    根据播放进度 (0-1) 返回应定位的字符位置。
+    乐章内按小节数均分时长，不按字符计算；多声部用最后一声部，确保滚动时全部可见。
+    actual_total: 实际播放总时长（秒），用于缩放 timeline 以匹配真实 TTS 时长。
+    """
+    if timeline:
+        timeline_total = sum(seg[1] + seg[2] for seg in timeline)
+        if timeline_total <= 0:
+            return 0
+        scale = (actual_total / timeline_total) if actual_total and actual_total > 0 else 1.0
+        elapsed = progress * (actual_total if actual_total and actual_total > 0 else timeline_total)
+        t_scaled = 0.0
+        for seg in timeline:
+            tts_dur, music_dur = seg[1], seg[2]
+            content_start, content_end = seg[3], seg[4]
+            pipes = seg[5] if len(seg) > 5 else []
+            seg_len = tts_dur + music_dur
+            seg_end_scaled = t_scaled + seg_len * scale
+            if elapsed < seg_end_scaled:
+                tts_end_scaled = t_scaled + tts_dur * scale
+                if elapsed < tts_end_scaled:
+                    return content_end - 1 if music_dur == 0 else content_start
+                if music_dur > 0 and pipes:
+                    music_start_scaled = tts_end_scaled
+                    music_len_scaled = music_dur * scale
+                    music_progress = (elapsed - music_start_scaled) / music_len_scaled
+                    num_bars = max(1, len(pipes) - 1)
+                    bar_idx = min(int(music_progress * num_bars), num_bars - 1)
+                    pos_in_line = pipes[bar_idx]
+                    return min(content_start + pos_in_line, content_end - 1)
+                if music_dur > 0:
+                    return content_start
+                return content_start
+            t_scaled = seg_end_scaled
+        last = timeline[-1]
+        return min(last[4] - 1, len(content) - 1)
+    # 无 timeline：按小节数均分，用最后一声部
+    try:
+        _, rest = _parse_global(content)
+    except Exception:
+        return 0
+    rest_start = content.find(rest) if rest and rest in content else 0
+    sections = _split_sections(rest)
+    if not sections:
+        return 0
+    total_bars = 0
+    segs: list[tuple[int, int, list[int], int]] = []  # (abs_start, length, pipes, cumulative_bars)
+    for block, part_lines in sections:
+        if not part_lines:
+            continue
+        block_in_rest = rest.find(block, 0)
+        if block_in_rest < 0:
+            block_in_rest = 0
+        block_abs_start = rest_start + block_in_rest
+        last_line = part_lines[-1]
+        part_line_offset = block.find(last_line, 0)
+        if part_line_offset < 0:
+            part_line_offset = 0
+        abs_start = block_abs_start + part_line_offset
+        pipes = _pipe_positions_at_depth_zero(last_line)
+        num_bars = max(1, len(pipes) - 1)
+        segs.append((abs_start, len(last_line), pipes, total_bars))
+        total_bars += num_bars
+    if total_bars <= 0:
+        return 0
+    target_bar = progress * total_bars
+    for abs_start, length, pipes, cumulative_bars in segs:
+        num_bars = max(1, len(pipes) - 1)
+        if target_bar < cumulative_bars + num_bars:
+            bar_idx = min(int(target_bar - cumulative_bars), num_bars - 1)
+            bar_idx = max(0, bar_idx)
+            pos_in_line = pipes[bar_idx]
+            return min(abs_start + pos_in_line, abs_start + length - 1)
+    return min(segs[-1][0] + segs[-1][1] - 1, len(content) - 1) if segs else 0
 
 
 def get_bar_ranges_at_cursor(content: str, cursor_pos: int) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:

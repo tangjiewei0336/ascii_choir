@@ -37,7 +37,7 @@ from src.ui.autocomplete import (
     get_chord_suggestions,
     ChordAutocompletePopup,
 )
-from src.utils.bar_utils import get_bar_ranges_at_cursor, extract_single_bar_for_preview
+from src.utils.bar_utils import get_bar_ranges_at_cursor, get_position_for_progress, build_playback_timeline, extract_single_bar_for_preview
 from src.utils.frozen_path import get_app_root
 from src.utils.i18n import _, get_language, set_language, SUPPORTED_LANGUAGES, LANGUAGE_LABELS
 
@@ -1792,6 +1792,9 @@ class App:
         self._playback_total = 0.0
         self._playback_progress_poll_id: str | None = None
         self._playback_progress_ui_switched = False
+        self._playback_bar_pos: int | None = None  # 播放时用于小节高亮的虚拟光标位置
+        self._playback_timeline: list | None = None  # 含 TTS 时长的时间轴
+        self._playback_content: str = ""  # 播放用的内容（expand 后）
 
         # 状态栏（PyCharm 风格）：左侧状态、右侧行列/拍数、右下角可嵌入进度条
         self.status_frame = ttk.Frame(main)
@@ -3006,13 +3009,16 @@ class App:
                 self.text.tag_add("bar_line", f"1.0+{i}c", f"1.0+{i+1}c")
 
     def _highlight_bars(self):
-        """光标在小节中时：浅色高亮当前小节，更浅色高亮所有同时演奏的小节"""
+        """光标在小节中时：浅色高亮当前小节，更浅色高亮所有同时演奏的小节。播放时用 _playback_bar_pos"""
         self.text.tag_remove("bar_current", "1.0", tk.END)
         self.text.tag_remove("bar_simultaneous", "1.0", tk.END)
         self.text.tag_remove("bar_clickable", "1.0", tk.END)
         try:
-            insert_idx = self.text.index("insert")
-            cursor_pos = len(self.text.get("1.0", insert_idx))
+            if self.is_playing and self._playback_bar_pos is not None:
+                cursor_pos = self._playback_bar_pos
+            else:
+                insert_idx = self.text.index("insert")
+                cursor_pos = len(self.text.get("1.0", insert_idx))
         except tk.TclError:
             return
         content = self.text.get(1.0, tk.END)
@@ -3025,6 +3031,8 @@ class App:
                 self.text.tag_add("bar_current", f"1.0+{start}c", f"1.0+{end}c")
         for tag in ("bar_simultaneous", "bar_current"):
             self.text.tag_raise(tag)
+        if self.is_playing:
+            return
         cmd_held = getattr(self, "_command_held", False)
         mouse_pos = getattr(self, "_bar_mouse_pos", None)
         if cmd_held and mouse_pos:
@@ -3503,6 +3511,8 @@ class App:
             import traceback
             show_error_detail(self.root, "导入错误", str(e), traceback.format_exc())
             return
+        self._playback_content = excerpt
+        self._playback_timeline = build_playback_timeline(excerpt)
         self.is_playing = True
         self.btn_play.config(state=tk.DISABLED)
         self.btn_play_segment.config(state=tk.DISABLED)
@@ -3601,6 +3611,8 @@ class App:
             show_error_detail(self.root, "导入错误", str(e), traceback.format_exc())
             return
 
+        self._playback_content = score
+        self._playback_timeline = build_playback_timeline(score)
         self.is_playing = True
         self.btn_play.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
@@ -3707,6 +3719,39 @@ class App:
             if t > 0:
                 self.progress_var.set(e / t * 100)
             self._progress_status_var.set(f"播放中 {e:.1f}s / {t:.1f}s")
+            # 根据进度自动滚动、移动光标、高亮小节（多声部同时高亮，考虑 TTS 时长）
+            if t > 0 and self.text.winfo_exists():
+                try:
+                    content = getattr(self, "_playback_content", None) or self.text.get(1.0, tk.END)
+                    if content:
+                        progress = min(e / (t * 0.93), 1.0) if t > 0 else 0
+                        pos = get_position_for_progress(
+                            content, progress,
+                            timeline=getattr(self, "_playback_timeline", None),
+                            actual_total=t,
+                        )
+                        pos = max(0, min(pos, len(content) - 1))
+                        # 若 pos 不在小节内，向前/后寻找最近的有效位置
+                        cur_r, sim_r = get_bar_ranges_at_cursor(content, pos)
+                        if not cur_r and not sim_r:
+                            for delta in range(1, min(200, len(content))):
+                                for p in [pos + delta, pos - delta]:
+                                    if 0 <= p < len(content):
+                                        cr, sr = get_bar_ranges_at_cursor(content, p)
+                                        if cr or sr:
+                                            pos = p
+                                            break
+                                else:
+                                    continue
+                                break
+                        self._playback_bar_pos = pos
+                        self.text.mark_set("insert", f"1.0+{pos}c")
+                        line = content[:pos].count("\n") + 1
+                        self.text.see(f"{line}.0")
+                        self._highlight_bars()
+                        self.text.tag_raise("sel")
+                except tk.TclError:
+                    pass
             if self.is_playing:
                 self._playback_progress_poll_id = self.root.after(80, _poll)
 
@@ -3735,7 +3780,11 @@ class App:
 
     def _on_play_finished(self):
         self.is_playing = False
+        self._playback_bar_pos = None
+        self._playback_timeline = None
+        self._playback_content = ""
         self._stop_playback_progress_poll()
+        self._schedule_highlights()
         self.btn_play.config(state=tk.NORMAL)
         self.btn_play_segment.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)
