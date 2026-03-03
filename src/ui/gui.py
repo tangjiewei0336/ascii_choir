@@ -390,6 +390,7 @@ class App:
         file_menu.add_command(label=_("另存为..."), command=self._on_save_as)
         file_menu.add_command(label=_("导出带歌词简谱 (JPG)..."), command=self._on_export_lyrics_jpg)
         file_menu.add_command(label=_("导出为 MP3..."), command=self._on_export_mp3)
+        file_menu.add_command(label=_("导出为 MIDI..."), command=self._on_export_midi)
         file_menu.add_separator()
         file_menu.add_command(label=_("打开工作区..."), command=self._on_open_workspace)
         file_menu.add_separator()
@@ -627,6 +628,54 @@ class App:
                 show_error_detail(self.root, "导出失败", msg, tb)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _on_export_midi(self):
+        """导出当前简谱为 MIDI 文件"""
+        content = self.text.get(1.0, tk.END)
+        if not content.strip():
+            messagebox.showwarning(_("提示"), _("请输入简谱内容"))
+            return
+        base_dir = (
+            self.workspace_root
+            if self.workspace_root and self.workspace_root.is_dir()
+            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+        )
+        try:
+            content = expand_imports(content, base_dir)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            import traceback
+            show_error_detail(self.root, _("导入错误"), str(e), traceback.format_exc())
+            return
+        try:
+            parsed = parse(content)
+        except Exception as e:
+            import traceback
+            show_error_detail(self.root, _("解析错误"), str(e), traceback.format_exc())
+            return
+
+        initialdir = str(self.current_file_path.parent) if self.current_file_path else None
+        initialfile = (self.current_file_path.stem + ".mid") if self.current_file_path else "export.mid"
+        path = filedialog.asksaveasfilename(
+            title=_("导出为 MIDI"),
+            initialdir=initialdir,
+            initialfile=initialfile,
+            defaultextension=".mid",
+            filetypes=[("MIDI 文件", "*.mid"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            from src.audio.export_midi import export_score_to_midi
+
+            out_path, err = export_score_to_midi(parsed, path)
+            if out_path:
+                messagebox.showinfo(_("导出成功"), _("已保存到 {path}").format(path=out_path))
+            else:
+                messagebox.showwarning(_("导出失败"), _(err) if err else _("无法导出 MIDI"))
+        except Exception as e:
+            import traceback
+            show_error_detail(self.root, _("导出失败"), str(e), traceback.format_exc())
 
     def _on_format(self):
         """格式化：对齐小节号"""
