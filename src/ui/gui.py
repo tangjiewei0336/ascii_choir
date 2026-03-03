@@ -391,6 +391,7 @@ class App:
         file_menu.add_command(label=_("导出带歌词简谱 (JPG)..."), command=self._on_export_lyrics_jpg)
         file_menu.add_command(label=_("导出为 MP3..."), command=self._on_export_mp3)
         file_menu.add_command(label=_("导出为 MIDI..."), command=self._on_export_midi)
+        file_menu.add_command(label=_("导入 MIDI..."), command=self._on_import_midi)
         file_menu.add_separator()
         file_menu.add_command(label=_("打开工作区..."), command=self._on_open_workspace)
         file_menu.add_separator()
@@ -676,6 +677,56 @@ class App:
         except Exception as e:
             import traceback
             show_error_detail(self.root, _("导出失败"), str(e), traceback.format_exc())
+
+    def _on_import_midi(self):
+        """导入 MIDI 文件，转换为 choir 格式并自动创建新文件（重名则加 (1)、(2)）"""
+        initialdir = str(self.current_file_path.parent) if self.current_file_path else None
+        mid_path = filedialog.askopenfilename(
+            title=_("导入 MIDI 文件"),
+            initialdir=initialdir,
+            filetypes=[(_("MIDI 文件"), "*.mid *.midi"), (_("所有文件"), "*.*")],
+        )
+        if not mid_path:
+            return
+        try:
+            from src.utils.midi_to_choir import midi_to_choir_text
+            choir_text = midi_to_choir_text(Path(mid_path))
+            choir_text = self._format_choir_text(choir_text)
+            save_dir = (
+                self.workspace_root
+                if self.workspace_root and self.workspace_root.is_dir()
+                else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+            )
+            base_name = Path(mid_path).stem
+            out_path = save_dir / f"{base_name}.choir"
+            n = 1
+            while out_path.exists():
+                out_path = save_dir / f"{base_name}({n}).choir"
+                n += 1
+            out_path.write_text(choir_text, encoding="utf-8")
+            self._load_file(out_path)
+            if self.workspace_root and save_dir.resolve() == self.workspace_root.resolve():
+                self._refresh_workspace_list()
+            self.status_label.config(text=_("已导入 MIDI: {path}").format(path=out_path.name))
+        except Exception as e:
+            import traceback
+            show_error_detail(self.root, _("导入失败"), str(e), traceback.format_exc())
+
+    def _format_choir_text(self, text: str, force_auto_wrap: bool = True) -> str:
+        """对 choir 文本执行格式化（小节对齐、自动换行等），不修改当前编辑器内容"""
+        prev_content = self.text.get(1.0, tk.END)
+        self.text.delete(1.0, tk.END)
+        self.text.insert(tk.END, text)
+        self._on_align(force_auto_wrap=force_auto_wrap)
+        result = self.text.get(1.0, tk.END)
+        self.text.delete(1.0, tk.END)
+        self.text.insert(tk.END, prev_content)
+        return result
+
+    def _insert_and_format(self, s: str):
+        """插入内容后自动格式化（用于伴奏生成、导入 MIDI 等）"""
+        self.text.insert(tk.INSERT, s)
+        self._on_format()
 
     def _on_format(self):
         """格式化：对齐小节号"""
@@ -1041,7 +1092,7 @@ class App:
                 current_filename=self.current_file_path.name if self.current_file_path else None,
                 base_dir=base_dir,
                 get_content=lambda: self.text.get(1.0, tk.END),
-                on_insert=lambda s: self.text.insert(tk.INSERT, s),
+                on_insert=lambda s: self._insert_and_format(s),
             )
         except ImportError as e:
             import traceback
@@ -1557,9 +1608,27 @@ class App:
         self._workspace_list.selection_clear(0, tk.END)
         self._workspace_list.selection_set(idx)
         menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label=_("在 Finder 中显示") if sys.platform == "darwin" else _("在文件资源管理器中显示"), command=lambda: self._on_workspace_reveal_in_finder(idx))
+        menu.add_separator()
         menu.add_command(label=_("重命名"), command=lambda: self._on_workspace_rename(idx))
         menu.add_command(label=_("删除"), command=lambda: self._on_workspace_delete(idx))
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _on_workspace_reveal_in_finder(self, idx: int):
+        """在 Finder/文件资源管理器中显示并选中该文件"""
+        files = self._get_workspace_files()
+        if idx >= len(files):
+            return
+        path = files[idx]
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["open", "-R", str(path)], check=True)
+            elif sys.platform == "win32":
+                subprocess.run(["explorer", '/select,"' + str(path.resolve()) + '"'], check=True)
+            else:
+                subprocess.run(["xdg-open", str(path.parent)], check=True)
+        except Exception as e:
+            show_error_detail(self.root, _("打开失败"), str(e), None)
 
     def _on_workspace_rename(self, idx: int):
         """重命名工作区文件"""
@@ -1969,8 +2038,8 @@ class App:
         self.text.insert(tk.END, text)
         self.text.edit_reset()
     
-    def _on_align(self, event=None):
-        """⌘⇧F/Ctrl+Shift+F: 对齐小节号；勾选时行超宽则自动换新篇章"""
+    def _on_align(self, event=None, force_auto_wrap: bool = False):
+        """⌘⇧F/Ctrl+Shift+F: 对齐小节号；勾选时行超宽则自动换新篇章。force_auto_wrap=True 时强制换行（用于导入生成）"""
         content = self.text.get(1.0, tk.END)
         lines = content.split("\n")
         # 按双换行分篇章，保留篇章间的非 & 行（如 \tonality{D}、空行等）
@@ -2000,12 +2069,12 @@ class App:
         if not sections:
             return "break"
         
-        # 估算每行可显示字符数（等宽）
+        # 估算每行可显示字符数（等宽）。上限 100 确保勾选自动换行时能触发
         try:
             cw = self.text.winfo_width() or 600
             f = tkfont.Font(self.text, self.text.cget("font"))
             char_w = max(f.measure("0"), 1)
-            max_chars = max(60, int(cw / char_w) - 4)
+            max_chars = max(60, min(100, int(cw / char_w) - 4))
         except Exception:
             max_chars = 80
         
@@ -2157,9 +2226,11 @@ class App:
             return result
         
         new_sections: list[tuple[list[str], list[str]]] = []
-        for section, sep_lines in sections:
+        sections_to_process: list[tuple[list[tuple[int, str]], list[str]]] = list(sections)
+        while sections_to_process:
+            section, sep_lines = sections_to_process.pop(0)
             part_lines = section
-            if self.auto_wrap_var.get():
+            if force_auto_wrap or self.auto_wrap_var.get():
                 any_long = any(len(L) > max_chars for _, L in part_lines)
                 if any_long:
                     all_data = [simple_split(L) for _, L in part_lines]
@@ -2191,7 +2262,11 @@ class App:
                     if head_section:
                         new_sections.append((align_section([(0, s) for s in head_section]), []))
                     if tail_section:
-                        new_sections.append((align_section([(0, s) for s in tail_section]), sep_lines))
+                        tail_part_lines = [(0, s) for s in tail_section]
+                        if any(len(s) > max_chars for _, s in tail_part_lines):
+                            sections_to_process.insert(0, (tail_part_lines, sep_lines))
+                        else:
+                            new_sections.append((align_section(tail_part_lines), sep_lines))
                     continue
             aligned = align_section(part_lines)
             new_sections.append((aligned, sep_lines))

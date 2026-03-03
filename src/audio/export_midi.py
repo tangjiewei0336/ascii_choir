@@ -1,9 +1,15 @@
 """
 将简谱解析结果导出为 MIDI 文件。
 依赖 mido 库。
+导出 key_signature 以在 roundtrip 时保留原始调性。
 """
 from pathlib import Path
 from typing import Optional
+
+# 半音偏移 0-11 对应 MIDI key_signature 的 key 字符串（大调）
+_TONALITY_OFFSET_TO_KEY: tuple[str, ...] = (
+    "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B",
+)
 
 # GM 乐器 -> MIDI Program (0-127)
 INSTRUMENT_TO_PROGRAM: dict[str, int] = {
@@ -94,9 +100,16 @@ def export_score_to_midi(
 
     mid = MidiFile(type=1, ticks_per_beat=ticks_per_beat)
 
-    # Track 0: 仅 tempo
+    # Track 0: tempo + key_signature（保留调性，roundtrip 时主旋律正确还原）
     tempo_track = MidiTrack()
     tempo_track.append(MetaMessage("set_tempo", tempo=tempo, time=0))
+    try:
+        from src.core.parser import _tonality_to_semitones
+        offset = _tonality_to_semitones(getattr(score.settings, "tonality", "0"))
+        key = _TONALITY_OFFSET_TO_KEY[offset % 12]
+        tempo_track.append(MetaMessage("key_signature", key=key, time=0))
+    except Exception:
+        pass
     tempo_track.append(MetaMessage("end_of_track", time=0))
     mid.tracks.append(tempo_track)
 

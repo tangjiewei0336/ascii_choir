@@ -12,3 +12,6 @@ sound_library/*.sh
 # PyInstaller
 build/
 dist/
+
+# Round-trip test output
+tmp_roundtrip/

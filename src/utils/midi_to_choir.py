@@ -2,6 +2,9 @@
 MIDI -> ASCII Choir (.choir) converter.
 - Determine tonality/key, time signature, tempo
 - Convert MIDI notes to simplified notation with rhythm
+- Supports triplets (三连音), quintuplets (五连音), 16th notes
+- Ties (连音线) for notes spanning bars
+- Bar-fill rest when quantization shortens a bar
 """
 from __future__ import annotations
 
@@ -26,18 +29,89 @@ class NoteEvent:
 
 _MAJOR_SCALE_PCS = {0, 2, 4, 5, 7, 9, 11}
 
+# Representable durations: 1/16, 1/8, 1/4, 1/2, 1; 1/3, 2/3; 1/5, 2/5, 3/5, 4/5
+# Plus longer: 3/2, 2, 3, 4. Finer for rest fill: 1/32, 1/64, ...
+_REPRESENTABLE = [
+    Fraction(1, 1024), Fraction(1, 512), Fraction(1, 256), Fraction(1, 128), Fraction(1, 64),
+    Fraction(1, 32), Fraction(1, 16), Fraction(1, 12), Fraction(1, 8), Fraction(1, 6), Fraction(1, 5),
+    Fraction(1, 4), Fraction(2, 5), Fraction(1, 3), Fraction(3, 8), Fraction(3, 5),
+    Fraction(1, 2), Fraction(2, 3), Fraction(3, 4), Fraction(4, 5),
+    Fraction(1), Fraction(3, 2), Fraction(2), Fraction(5, 2), Fraction(3), Fraction(4),
+]
+_TOLERANCE = Fraction(1, 64)
+_VALIDATOR_TOL = Fraction(1, 1000)  # validator 使用 0.001 容差
+
+
+def _underscores_for_fraction(d: Fraction) -> int:
+    """1/2->1, 1/4->2, 1/8->3, 1/16->4, 1/32->5, ..."""
+    if d >= 1:
+        return 0
+    x = float(d)
+    u = 1
+    while u <= 12 and abs(x - 1 / (2**u)) > 0.0001:
+        u += 1
+    if u <= 12 and abs(x - 1 / (2**u)) <= 0.0001:
+        return u
+    return 4
+
+
+def _largest_representable_le(x: Fraction) -> Fraction | None:
+    """返回 <= x 的最大可表示时值，用于补休止时不超拍"""
+    if x <= 0:
+        return None
+    for r in reversed(_REPRESENTABLE):
+        if r <= x:
+            return r
+    return None
+
+
+# 3/4、4/5 的 suffix 为 ""，parser 会解析为 1 拍，导致超拍。clamp 时需避开。
+_AMBIGUOUS_SUFFIX = {Fraction(3, 4), Fraction(4, 5)}
+
+
+def _largest_representable_le_safe(x: Fraction) -> Fraction | None:
+    """同 _largest_representable_le，但避开 3/4、4/5（suffix 歧义）。"""
+    if x <= 0:
+        return None
+    for r in reversed(_REPRESENTABLE):
+        if r <= x and r not in _AMBIGUOUS_SUFFIX:
+            return r
+    return None
+
+
+def _quantize_duration(d: Fraction) -> Fraction:
+    """Quantize duration to nearest representable. Approximate smaller values to 1/16."""
+    if d <= 0:
+        return Fraction(1, 16)
+    if d < Fraction(1, 32):
+        return Fraction(1, 16)
+    best = _REPRESENTABLE[0]
+    best_err = abs(d - best)
+    for r in _REPRESENTABLE:
+        if r > d * 2:
+            break
+        err = abs(d - r)
+        if err < best_err:
+            best_err = err
+            best = r
+    return best
+
+
+def _quantize_position(pos: Fraction, grid: int = 240) -> Fraction:
+    """Quantize position to grid (240 = LCM-ish for 16,3,5)."""
+    u = int(round(float(pos) * grid))
+    return Fraction(u, grid)
+
 
 def _parse_key_signature(key: Optional[str]) -> tuple[int, str] | None:
     if not key:
         return None
     k = key.strip()
-    # mido uses e.g. "C", "F#", "Bb", "Am", "F#m"
     is_minor = False
     if k.endswith("m") and len(k) >= 2:
         is_minor = True
         k = k[:-1]
     base = k.upper()
-    # Normalize flats/sharps in base
     if len(base) >= 2 and base[1] in ("#", "B"):
         letter = base[0]
         acc = base[1]
@@ -50,16 +124,14 @@ def _parse_key_signature(key: Optional[str]) -> tuple[int, str] | None:
     pc = pc_map[letter]
     if acc == "#":
         pc = (pc + 1) % 12
-    elif acc == "B":  # flat
+    elif acc == "B":
         pc = (pc - 1) % 12
-    # Output tonality string (prefer #/b prefix style)
     if acc == "#":
         tonality = f"#{letter}"
     elif acc == "B":
         tonality = f"b{letter}"
     else:
         tonality = letter
-    # Minor keys still use tonic offset for simplified notation
     return pc, tonality
 
 
@@ -78,48 +150,260 @@ def _infer_key_from_pitches(pitches: list[int]) -> tuple[int, str]:
         if score > best_score:
             best_score = score
             best_pc = tonic
-    # Map tonic to tonality label (prefer flats for 1,3,6,8,10?)
     pc_to_label = {
-        0: "C",
-        1: "#C",
-        2: "D",
-        3: "#D",
-        4: "E",
-        5: "F",
-        6: "#F",
-        7: "G",
-        8: "#G",
-        9: "A",
-        10: "#A",
-        11: "B",
+        0: "C", 1: "#C", 2: "D", 3: "#D", 4: "E", 5: "F",
+        6: "#F", 7: "G", 8: "#G", 9: "A", 10: "#A", 11: "B",
     }
     return best_pc, pc_to_label[best_pc]
 
 
-def _quantize(value: float, denom: int = 16) -> Fraction:
-    return Fraction(int(round(value * denom)), denom)
-
-
 def _chord_str(midis: list[int], tonality_offset: int) -> str:
+    if not midis:
+        return "0"
     parts = [midi_to_simplified_notation(m, tonality_offset) for m in sorted(midis)]
     return "/".join(parts)
+
+
+def _decompose_duration(d: Fraction) -> list[tuple[Fraction, bool]] | None:
+    """若 d 可分解为两个可表示时值之和，返回 [(a, True), (b, False)] 用于连音线表示；否则 None。
+    优先用 2 的幂次（1/2, 1/4, 1/8...）避免歧义。"""
+    if d <= 0:
+        return None
+    binary = [Fraction(1, 2**k) for k in range(0, 11)]  # 1, 1/2, 1/4, ...
+    for a in binary:
+        if a >= d:
+            continue
+        b = d - a
+        if b in _REPRESENTABLE:
+            return [(a, True), (b, False)]
+    for a in reversed(_REPRESENTABLE):
+        if a >= d or a in binary:
+            continue
+        b = d - a
+        if b in _REPRESENTABLE:
+            return [(a, True), (b, False)]
+    return None
+
+
+def _duration_to_rest_tokens(d: Fraction) -> list[str]:
+    """将时值编码为休止 token 列表。可直接表示（如 1/2→0_）则单 token；可分解时用连音线（如 1.5→0 ~0_）。"""
+    # 仅当 d 有明确后缀时才用单 token（排除 3/2、5/2 等，它们会误编码为 0-）
+    if d in _REPRESENTABLE and (d < 1 or d == int(d)):
+        return ["0" + _duration_to_suffix(d, False)]
+    decomp = _decompose_duration(d)
+    if decomp:
+        result: list[str] = []
+        for i, (part, _) in enumerate(decomp):
+            suffix = _duration_to_suffix(part, tied_from_prev=False)
+            result.append(("~" if i > 0 else "") + "0" + suffix)
+        return result
+    return ["0" + _duration_to_suffix(d, False)]
+
+
+def _duration_to_suffix(d: Fraction, tied_from_prev: bool = False) -> str:
+    """Encode duration as suffix: -, _, __, ___... Tuplets use ( )n. 可用连音线 ~ 分解时值。"""
+    sym = "~" if tied_from_prev else ""
+    if d >= 1:
+        dashes = int(d) - 1
+        return sym + "-" * min(dashes, 4)
+    if d == Fraction(1, 2):
+        return sym + "_"
+    if d == Fraction(1, 4):
+        return sym + "__"
+    if d == Fraction(1, 8):
+        return sym + "___"
+    if d == Fraction(1, 16):
+        return sym + "____"
+    if d in (Fraction(1, 3), Fraction(1, 5)):
+        return sym + ""
+    if d == Fraction(2, 3):
+        return sym + "_"
+    if d == Fraction(1, 6):
+        return sym + "___"
+    if d == Fraction(1, 12):
+        return sym + "____"
+    if d == Fraction(2, 5):
+        return sym + "_"
+    if d == Fraction(3, 5):
+        return sym + "_"
+    if d == Fraction(4, 5):
+        return sym + ""
+    if d == Fraction(3, 8):
+        return sym + "_"
+    if d == Fraction(3, 4):
+        return sym + ""
+    if d >= Fraction(1, 2):
+        return sym + "_"
+    if d >= Fraction(1, 4):
+        return sym + "__"
+    if d >= Fraction(1, 8):
+        return sym + "___"
+    if d >= Fraction(1, 16):
+        return sym + "____"
+    n = 5
+    while n <= 12:
+        if abs(float(d) - 1 / (2**n)) < 0.0001:
+            return sym + "_" * n
+        n += 1
+    return sym + "____"
 
 
 def _split_event_across_bars(
     event: NoteEvent,
     beats_per_bar: Fraction,
-) -> list[tuple[Fraction, Fraction, list[int]]]:
-    result: list[tuple[Fraction, Fraction, list[int]]] = []
+) -> list[tuple[Fraction, Fraction, list[int], bool]]:
+    """Split event at bar boundaries. Returns [(start, dur, midis, tied_from_prev), ...]"""
+    result: list[tuple[Fraction, Fraction, list[int], bool]] = []
     start = event.start_beat
     remaining = event.duration
+    first = True
     while remaining > 0:
-        pos_in_bar = start % beats_per_bar
+        bar_idx = int(start // beats_per_bar) if beats_per_bar > 0 else 0
+        bar_start = bar_idx * beats_per_bar
+        pos_in_bar = start - bar_start
         left_in_bar = beats_per_bar - pos_in_bar
-        seg = remaining if remaining <= left_in_bar else left_in_bar
-        result.append((start, seg, event.midis))
+        seg = min(remaining, left_in_bar)
+        if seg > 0:
+            result.append((start, seg, event.midis, not first))
+            first = False
         start += seg
         remaining -= seg
     return result
+
+
+def _detect_tuplet_group(
+    events: list[tuple[Fraction, Fraction, list[int], bool]],
+    beats_per_bar: Fraction,
+) -> list[list[tuple[Fraction, Fraction, list[int], bool]]]:
+    """Group consecutive events into tuplets (3 or 5) when duration matches.
+    Also (a b c)_: 3 consecutive 1/2 segments (may include rest) -> triplet with _ suffix."""
+    groups: list[list[tuple[Fraction, Fraction, list[int], bool]]] = []
+    i = 0
+    while i < len(events):
+        start, dur, midis, tied = events[i]
+        n = 1
+        if dur == Fraction(1, 3):
+            while i + n < len(events):
+                s2, d2, m2, t2 = events[i + n]
+                if d2 == Fraction(1, 3) and abs((s2 + d2) - (start + dur * n)) < _TOLERANCE:
+                    n += 1
+                else:
+                    break
+            groups.append(events[i : i + n])
+            i += n
+            continue
+        if dur == Fraction(1, 5):
+            while i + n < len(events):
+                s2, d2, m2, t2 = events[i + n]
+                if d2 == Fraction(1, 5) and abs((s2 + d2) - (start + dur * n)) < _TOLERANCE:
+                    n += 1
+                else:
+                    break
+            groups.append(events[i : i + n])
+            i += n
+            continue
+        # (a b c)_: 3 consecutive 1/2 segments (may include rest) -> triplet with _ suffix
+        if dur == Fraction(1, 2) and i + 2 < len(events):
+            s2, d2, m2, t2 = events[i + 1]
+            s3, d3, m3, t3 = events[i + 2]
+            if (
+                d2 == Fraction(1, 2)
+                and d3 == Fraction(1, 2)
+                and abs((s2 + d2) - s3) < _TOLERANCE
+                and abs((s3 + d3) - (start + Fraction(3, 2))) < _TOLERANCE
+            ):
+                groups.append(events[i : i + 3])
+                i += 3
+                continue
+        groups.append([events[i]])
+        i += 1
+    return groups
+
+
+def _encode_bar_events(
+    segments: list[tuple[Fraction, Fraction, list[int], bool]],
+    beats_per_bar: Fraction,
+    tonality_offset: int,
+    bar_start: Fraction = Fraction(0),
+) -> tuple[list[str], Fraction]:
+    """
+    Encode segments into choir tokens. Returns (tokens, used_beats).
+    Clamps segments to avoid overshoot; adds leading rest if first note is late; adds rest to fill bar.
+    """
+    tokens: list[str] = []
+    used = Fraction(0)
+
+    # Leading rest: if first segment starts after bar_start, add rest(s) to fill the gap
+    if segments:
+        first_start = segments[0][0]
+        gap_start = first_start - bar_start
+        while gap_start > _VALIDATOR_TOL:
+            if gap_start in _REPRESENTABLE or _decompose_duration(gap_start):
+                for t in _duration_to_rest_tokens(gap_start):
+                    tokens.append(t)
+                used += gap_start
+                break
+            rest_dur = _largest_representable_le(gap_start)
+            if rest_dur is None or rest_dur <= 0:
+                rest_dur = Fraction(1, 16)
+            suffix = _duration_to_suffix(rest_dur, False)
+            tokens.append("0" + suffix)
+            used += rest_dur
+            gap_start -= rest_dur
+
+    groups = _detect_tuplet_group(segments, beats_per_bar)
+
+    for group in groups:
+        space_left = beats_per_bar - used
+        if space_left <= _VALIDATOR_TOL:
+            break
+
+        if len(group) >= 1 and group[0][1] == Fraction(1, 3):
+            # Triplet: each note = 1/3 beat
+            max_notes = min(len(group), max(0, int(space_left / Fraction(1, 3))))
+            if max_notes <= 0:
+                break
+            sub = group[:max_notes]
+            syms = [_chord_str(m, tonality_offset) for _, _, m, tied in sub]
+            tokens.append("(" + " ".join(syms) + ")3")
+            used += len(sub) * Fraction(1, 3)
+        elif len(group) >= 1 and group[0][1] == Fraction(1, 5):
+            max_notes = min(len(group), max(0, int(space_left / Fraction(1, 5))))
+            if max_notes <= 0:
+                break
+            sub = group[:max_notes]
+            syms = [_chord_str(m, tonality_offset) for _, _, m, tied in sub]
+            tokens.append("(" + " ".join(syms) + ")5")
+            used += len(sub) * Fraction(1, 5)
+        elif len(group) == 3 and group[0][1] == Fraction(1, 2):
+            # (a b c)_: 3 eighths, may include rest
+            syms = [_chord_str(m, tonality_offset) for _, _, m, tied in group]
+            tokens.append("(" + " ".join(syms) + ")_")
+            used += Fraction(3, 2)
+        else:
+            for start, dur, midis, tied in group:
+                space_left = beats_per_bar - used
+                if space_left <= _VALIDATOR_TOL:
+                    break
+                clamp_dur = min(dur, space_left)
+                rep_dur = _largest_representable_le_safe(clamp_dur) or _largest_representable_le(clamp_dur) or _quantize_duration(clamp_dur)
+                if rep_dur > space_left:
+                    rep_dur = _largest_representable_le_safe(space_left) or _largest_representable_le(space_left) or rep_dur
+                chord = _chord_str(midis, tonality_offset)
+                suffix = _duration_to_suffix(rep_dur, tied)
+                if chord.startswith("0") or chord == "0":
+                    tokens.append("0" + suffix)
+                else:
+                    tokens.append(chord + suffix)
+                used += rep_dur
+
+    # Bar fill: 用 0~ 表示填满小节剩余拍数（parser 支持 0~ = 休止到小节末）
+    gap = beats_per_bar - used
+    if gap > _VALIDATOR_TOL:
+        tokens.append("0~")
+        used = beats_per_bar
+
+    return tokens, used
 
 
 def _build_line(
@@ -128,77 +412,75 @@ def _build_line(
     tonality_offset: int,
     total_beats: Fraction,
 ) -> str:
-    # Simple syntax: quantize to 1/16 beat, no ~. Use "_" and "-" only.
-    units_per_beat = 16
-    units_per_bar = int(beats_per_bar * units_per_beat) if beats_per_bar > 0 else 64
+    """Build choir line with ties, tuplets, 16th, and bar-fill rest."""
+    if beats_per_bar <= 0:
+        beats_per_bar = Fraction(4)
 
-    total_units = int(_quantize(float(total_beats), units_per_beat) * units_per_beat)
-    if total_units <= 0:
-        total_units = units_per_bar
-    if total_units % units_per_bar != 0:
-        total_units += units_per_bar - (total_units % units_per_bar)
-
-    timeline: list[str] = ["0"] * total_units
-    for ev in sorted(events, key=lambda e: (e.start_beat, -len(e.midis))):
-        start_u = int(ev.start_beat * units_per_beat)
-        dur_u = int(max(1, ev.duration * units_per_beat))
-        if start_u >= total_units:
+    # Quantize events
+    q_events: list[NoteEvent] = []
+    for ev in events:
+        q_start = _quantize_position(ev.start_beat)
+        q_dur = _quantize_duration(ev.duration)
+        if q_dur <= 0:
             continue
-        end_u = min(total_units, start_u + dur_u)
-        chord = _chord_str(ev.midis, tonality_offset)
-        for u in range(start_u, end_u):
-            if timeline[u] == "0":
-                timeline[u] = chord
+        q_events.append(NoteEvent(start_beat=q_start, duration=q_dur, midis=ev.midis))
 
-    def encode_run(sym: str, run_units: int) -> list[str]:
-        tokens: list[str] = []
-        while run_units > 0:
-            if run_units >= 64:
-                tokens.append(sym + "---")
-                run_units -= 64
-            elif run_units >= 48:
-                tokens.append(sym + "--")
-                run_units -= 48
-            elif run_units >= 32:
-                tokens.append(sym + "-")
-                run_units -= 32
-            elif run_units >= 16:
-                tokens.append(sym)
-                run_units -= 16
-            elif run_units >= 8:
-                tokens.append(sym + "_")
-                run_units -= 8
-            elif run_units >= 4:
-                tokens.append(sym + "__")
-                run_units -= 4
-            elif run_units >= 2:
-                tokens.append(sym + "___")
-                run_units -= 2
-            else:
-                tokens.append(sym + "____")
-                run_units -= 1
-        return tokens
+    # Split by bars and collect segments per bar
+    all_segments: list[tuple[int, Fraction, Fraction, list[int], bool]] = []
+    for ev in sorted(q_events, key=lambda e: (e.start_beat, -len(e.midis))):
+        for start, dur, midis, tied in _split_event_across_bars(ev, beats_per_bar):
+            bar_idx = int(start // beats_per_bar) if beats_per_bar > 0 else 0
+            all_segments.append((bar_idx, start, dur, midis, tied))
 
-    tokens: list[str] = []
-    for bar_start in range(0, total_units, units_per_bar):
-        tokens.append("|")
-        u = bar_start
-        bar_end = bar_start + units_per_bar
-        while u < bar_end:
-            sym = timeline[u]
-            run = 1
-            while u + run < bar_end and timeline[u + run] == sym:
-                run += 1
-            tokens.extend(encode_run(sym, run))
-            u += run
-    tokens.append("|")
-    return " ".join(tokens)
+    # Group by bar
+    bars: dict[int, list[tuple[Fraction, Fraction, list[int], bool]]] = defaultdict(list)
+    for bar_idx, start, dur, midis, tied in all_segments:
+        bars[bar_idx].append((start, dur, midis, tied))
+
+    # Sort segments within each bar
+    for bar_idx in bars:
+        bars[bar_idx].sort(key=lambda x: x[0])
+
+    # Fill gaps with rest segments (preserves "rest inside tuplet" like (2/4 3/5 0)_)
+    for bar_idx in bars:
+        bar_start = bar_idx * beats_per_bar
+        bar_end = bar_start + beats_per_bar
+        segs = bars[bar_idx]
+        filled: list[tuple[Fraction, Fraction, list[int], bool]] = []
+        used_end = bar_start
+        for start, dur, midis, tied in segs:
+            gap = start - used_end
+            if gap > _TOLERANCE:
+                filled.append((used_end, gap, [], False))
+            filled.append((start, dur, midis, tied))
+            used_end = start + dur
+        bars[bar_idx] = filled
+
+    # Compute number of bars
+    num_bars = int((total_beats + beats_per_bar - 1) // beats_per_bar) if total_beats > 0 else 1
+    num_bars = max(num_bars, max(bars.keys()) + 1) if bars else 1
+
+    # Encode each bar
+    result_tokens: list[str] = []
+    for bar_idx in range(num_bars):
+        result_tokens.append("|")
+        segs = bars.get(bar_idx, [])
+        if segs:
+            bar_start = bar_idx * beats_per_bar
+            bar_tokens, _ = _encode_bar_events(segs, beats_per_bar, tonality_offset, bar_start)
+            result_tokens.extend(bar_tokens)
+        else:
+            result_tokens.append("0" + "-" * (int(beats_per_bar) - 1) if beats_per_bar >= 1 else "0")
+    result_tokens.append("|")
+
+    return " ".join(result_tokens)
 
 
 def _collect_notes(mid: MidiFile):
     ticks_per_beat = mid.ticks_per_beat
     notes_by_channel: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
-    active: dict[tuple[int, int], int] = {}
+    # 同一 (channel, note) 可重叠：用队列存储多个 note_on 的 start，note_off 时配对最早的（FIFO）
+    active: dict[tuple[int, int], list[int]] = defaultdict(list)
     program_by_channel: dict[int, int] = {}
     tempo = None
     time_sig = None
@@ -217,13 +499,15 @@ def _collect_notes(mid: MidiFile):
             elif msg.type == "program_change":
                 program_by_channel[msg.channel] = msg.program
             elif msg.type == "note_on" and msg.velocity > 0:
-                active[(msg.channel, msg.note)] = abs_tick
+                active[(msg.channel, msg.note)].append(abs_tick)
             elif msg.type == "note_off":
-                start = active.pop((msg.channel, msg.note), None)
+                stack = active[(msg.channel, msg.note)]
+                start = stack.pop(0) if stack else None
                 if start is not None and abs_tick > start:
                     notes_by_channel[msg.channel].append((start, abs_tick, msg.note))
             elif msg.type == "note_on" and msg.velocity == 0:
-                start = active.pop((msg.channel, msg.note), None)
+                stack = active[(msg.channel, msg.note)]
+                start = stack.pop(0) if stack else None
                 if start is not None and abs_tick > start:
                     notes_by_channel[msg.channel].append((start, abs_tick, msg.note))
 
@@ -233,7 +517,6 @@ def _collect_notes(mid: MidiFile):
 def _program_to_instrument(program: int, is_drum: bool) -> str:
     if is_drum:
         return "drums"
-    # GM program ranges
     if 0 <= program <= 7:
         return "grand_piano"
     if 24 <= program <= 31:
@@ -256,13 +539,12 @@ def _program_to_instrument(program: int, is_drum: bool) -> str:
 
 
 def _assign_voices(events: list[NoteEvent]) -> list[list[NoteEvent]]:
-    # Interval partitioning: assign to minimal voices without overlap
     voices: list[list[NoteEvent]] = []
     voice_ends: list[Fraction] = []
     for ev in sorted(events, key=lambda e: (e.start_beat, -e.duration)):
         assigned = False
         for i, end in enumerate(voice_ends):
-            if ev.start_beat >= end:
+            if ev.start_beat >= end - _TOLERANCE:
                 voices[i].append(ev)
                 voice_ends[i] = ev.start_beat + ev.duration
                 assigned = True
@@ -273,11 +555,172 @@ def _assign_voices(events: list[NoteEvent]) -> list[list[NoteEvent]]:
     return voices
 
 
+def _token_duration(tok: str, base: Fraction = Fraction(1)) -> Fraction:
+    """Parse a choir token and return its duration in beats. base=1 for quarter."""
+    if not tok or tok == "|":
+        return Fraction(0)
+    if tok.startswith("(") and ")" in tok:
+        # Tuplet: (a b c)3, (a b c d e)5, or (a b c)_ (3 eighths)
+        close = tok.index(")")
+        inner = tok[1:close]
+        suffix = tok[close + 1 :].lstrip()
+        count = len([x for x in inner.split() if x and not x.isspace()])
+        if suffix.startswith("_"):
+            # (a b c)_ = 3 eighths = 1.5 beats
+            return count * Fraction(1, 2)
+        n = int(suffix) if suffix and suffix[0].isdigit() else 3
+        if n == 3:
+            return count * Fraction(1, 3)
+        if n == 5:
+            return count * Fraction(1, 5)
+        return count * Fraction(1, n) if n > 0 else Fraction(0)
+    # Strip tie ~, accidentals, octave dots (e.g. ~0_, ..#6 -> 6)
+    core = tok.lstrip("~").lstrip("#b^").lstrip(".").lstrip("#b^").rstrip("~")
+    ext = sum(1 for c in core if c == "-")
+    shrt = sum(1 for c in core if c == "_")
+    core = core.rstrip("-_")
+    if core.endswith("."):
+        core = core.rstrip(".")
+    if not core or core[0] not in "0123456789":
+        return Fraction(0)
+    return base * (1 + ext) * (Fraction(1, 2) ** shrt)
+
+
+def _merge_consecutive_tuplets(tokens: list[str]) -> list[str]:
+    """
+    后处理：合并连续的单音三/五连音、八分、十六分。
+    (1)3 (2)3 (5)3 (1)3 (2)3 (5)3 → (1 2 5 1 2 5)3
+    1_ 2_ 5_ 1_ 2_ 5_ → (1 2 5 1 2 5)_
+    1__ 2__ 5__ → (1 2 5)__
+    """
+    result: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        # (x)3 或 (x)5：单音连音（inner 无空格），合并连续同类型
+        if t.startswith("(") and ")" in t:
+            close = t.index(")")
+            inner = t[1:close]
+            suff = t[close + 1 :].lstrip()
+            if suff in ("3", "5") and " " not in inner and len(inner) >= 1:
+                group = [inner]
+                j = i + 1
+                while j < len(tokens):
+                    nxt = tokens[j]
+                    if nxt.startswith("(") and ")" in nxt:
+                        nc = nxt.index(")")
+                        ninner = nxt[1:nc]
+                        nsuff = nxt[nc + 1 :].lstrip()
+                        if nsuff == suff and " " not in ninner and len(ninner) >= 1:
+                            group.append(ninner)
+                            j += 1
+                        else:
+                            break
+                    else:
+                        break
+                result.append("(" + " ".join(group) + ")" + suff)
+                i = j
+                continue
+
+        # x_ 八分：合并连续单音八分（不含 ~ 开头的连音延续）
+        if (
+            t != "|"
+            and t.endswith("_")
+            and not t.endswith("__")
+            and not t.startswith("~")
+        ):
+            group = [t[:-1]]
+            j = i + 1
+            while j < len(tokens):
+                nxt = tokens[j]
+                if (
+                    nxt != "|"
+                    and nxt.endswith("_")
+                    and not nxt.endswith("__")
+                    and not nxt.startswith("~")
+                ):
+                    group.append(nxt[:-1])
+                    j += 1
+                else:
+                    break
+            if len(group) >= 2:
+                result.append("(" + " ".join(group) + ")_")
+                i = j
+                continue
+
+        # x__ 十六分：合并连续单音十六分
+        if (
+            t != "|"
+            and t.endswith("__")
+            and not t.endswith("___")
+            and not t.startswith("~")
+        ):
+            group = [t[:-2]]
+            j = i + 1
+            while j < len(tokens):
+                nxt = tokens[j]
+                if (
+                    nxt != "|"
+                    and nxt.endswith("__")
+                    and not nxt.endswith("___")
+                    and not nxt.startswith("~")
+                ):
+                    group.append(nxt[:-2])
+                    j += 1
+                else:
+                    break
+            if len(group) >= 2:
+                result.append("(" + " ".join(group) + ")__")
+                i = j
+                continue
+
+        result.append(t)
+        i += 1
+    return result
+
+
+def _fix_bar_durations(
+    bodies: list[list[str]],
+    beats_per_bar: Fraction,
+) -> list[list[str]]:
+    """Post-process: add rest to any bar that sums to less than beats_per_bar."""
+    tol = Fraction(1, 1000)
+    result: list[list[str]] = []
+    for tokens in bodies:
+        bars: list[list[str]] = []
+        current: list[str] = []
+        for t in tokens:
+            if t == "|":
+                if current:
+                    bars.append(current)
+                current = []
+            else:
+                current.append(t)
+        if current:
+            bars.append(current)
+
+        fixed: list[str] = []
+        for bar in bars:
+            if "0~" in bar:
+                total = beats_per_bar
+            else:
+                total = sum(_token_duration(t) for t in bar)
+            gap = beats_per_bar - total
+            new_bar = list(bar)
+            while gap > tol:
+                new_bar.append("0~")
+                break
+            fixed.append("|")
+            fixed.extend(new_bar)
+        if fixed:
+            fixed.append("|")
+        result.append(fixed)
+    return result
+
+
 def _drop_empty_bars(bodies: list[list[str]]) -> list[list[str]]:
-    # Remove bars where all parts are rests (only 0____ tokens)
     if not bodies:
         return bodies
-    # Split into bars per line
     bars_per_line: list[list[list[str]]] = []
     for tokens in bodies:
         bars: list[list[str]] = []
@@ -308,7 +751,6 @@ def _drop_empty_bars(bodies: list[list[str]]) -> list[list[str]]:
                 break
         keep.append(any_note)
 
-    # Rebuild bodies
     rebuilt: list[list[str]] = []
     for line_bars in bars_per_line:
         out: list[str] = []
@@ -332,6 +774,8 @@ def midi_to_choir_text(mid_path: Path) -> str:
     all_pitches = [m for ch in notes_by_channel for _, _, m in notes_by_channel[ch]]
     key_info = _parse_key_signature(key_sig) or _infer_key_from_pitches(all_pitches)
     tonality_offset, tonality_label = key_info
+    if tonality_label == "C":
+        tonality_label = "0"
 
     numerator, denominator = time_sig or (4, 4)
     beats_per_bar = Fraction(numerator, 1)
@@ -346,6 +790,11 @@ def midi_to_choir_text(mid_path: Path) -> str:
     parts: list[tuple[str, list[NoteEvent]]] = []
     total_beats = Fraction(0)
 
+    try:
+        from src.instruments.instrument_registry import can_play_note, can_play_chord
+    except ImportError:
+        can_play_note = can_play_chord = None
+
     for ch, items in sorted(notes_by_channel.items(), key=lambda x: x[0]):
         is_drum = ch == 9
         program = program_by_channel.get(ch, 0)
@@ -353,7 +802,6 @@ def midi_to_choir_text(mid_path: Path) -> str:
         if inst not in instruments:
             inst = "grand_piano"
         events: list[NoteEvent] = []
-        # Group by start -> duration buckets
         start_map: dict[int, list[tuple[int, int]]] = defaultdict(list)
         for start, end, midi in items:
             start_map[start].append((end, midi))
@@ -362,14 +810,23 @@ def midi_to_choir_text(mid_path: Path) -> str:
             for end, midi in entries:
                 durations[end - start].append(midi)
             for dur_ticks, midis in durations.items():
-                start_beat = _quantize((start / ticks_per_beat) * beat_factor)
-                dur_beat = _quantize((dur_ticks / ticks_per_beat) * beat_factor)
+                start_beat = _quantize_position((start / ticks_per_beat) * beat_factor)
+                dur_beat = _quantize_duration(Fraction(dur_ticks, ticks_per_beat) * beat_factor)
                 if dur_beat <= 0:
                     continue
                 events.append(NoteEvent(start_beat=start_beat, duration=dur_beat, midis=midis))
                 end_beat = start_beat + dur_beat
                 if end_beat > total_beats:
                     total_beats = end_beat
+        if events and can_play_note and can_play_chord:
+            for ev in events:
+                if len(ev.midis) == 1:
+                    if not can_play_note(inst, ev.midis[0]):
+                        inst = "grand_piano"
+                        break
+                elif not can_play_chord(inst, ev.midis):
+                    inst = "grand_piano"
+                    break
         if events:
             parts.append((inst, events))
 
@@ -389,9 +846,10 @@ def midi_to_choir_text(mid_path: Path) -> str:
             tokens = line.split()
             lines.append((prefix, tokens))
 
-    # Drop bars that are all rests across all parts
     if lines:
         bodies = _drop_empty_bars([tokens for _, tokens in lines])
+        bodies = _fix_bar_durations(bodies, beats_per_bar)
+        bodies = [_merge_consecutive_tuplets(b) for b in bodies]
         lines = [(prefix, body) for (prefix, _), body in zip(lines, bodies) if body]
 
     output_lines: list[str] = []
