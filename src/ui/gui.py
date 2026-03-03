@@ -37,7 +37,7 @@ from src.ui.autocomplete import (
     get_chord_suggestions,
     ChordAutocompletePopup,
 )
-from src.utils.bar_utils import get_bar_ranges_at_cursor, extract_single_bar_for_preview
+from src.utils.bar_utils import get_bar_ranges_at_cursor, get_position_for_progress, build_playback_timeline, extract_single_bar_for_preview
 from src.utils.frozen_path import get_app_root
 from src.utils.i18n import _, get_language, set_language, SUPPORTED_LANGUAGES, LANGUAGE_LABELS
 
@@ -390,6 +390,8 @@ class App:
         file_menu.add_command(label=_("另存为..."), command=self._on_save_as)
         file_menu.add_command(label=_("导出带歌词简谱 (JPG)..."), command=self._on_export_lyrics_jpg)
         file_menu.add_command(label=_("导出为 MP3..."), command=self._on_export_mp3)
+        file_menu.add_command(label=_("导出为 MIDI..."), command=self._on_export_midi)
+        file_menu.add_command(label=_("导入 MIDI..."), command=self._on_import_midi)
         file_menu.add_separator()
         file_menu.add_command(label=_("打开工作区..."), command=self._on_open_workspace)
         file_menu.add_separator()
@@ -627,6 +629,104 @@ class App:
                 show_error_detail(self.root, "导出失败", msg, tb)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _on_export_midi(self):
+        """导出当前简谱为 MIDI 文件"""
+        content = self.text.get(1.0, tk.END)
+        if not content.strip():
+            messagebox.showwarning(_("提示"), _("请输入简谱内容"))
+            return
+        base_dir = (
+            self.workspace_root
+            if self.workspace_root and self.workspace_root.is_dir()
+            else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+        )
+        try:
+            content = expand_imports(content, base_dir)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            import traceback
+            show_error_detail(self.root, _("导入错误"), str(e), traceback.format_exc())
+            return
+        try:
+            parsed = parse(content)
+        except Exception as e:
+            import traceback
+            show_error_detail(self.root, _("解析错误"), str(e), traceback.format_exc())
+            return
+
+        initialdir = str(self.current_file_path.parent) if self.current_file_path else None
+        initialfile = (self.current_file_path.stem + ".mid") if self.current_file_path else "export.mid"
+        path = filedialog.asksaveasfilename(
+            title=_("导出为 MIDI"),
+            initialdir=initialdir,
+            initialfile=initialfile,
+            defaultextension=".mid",
+            filetypes=[("MIDI 文件", "*.mid"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            from src.audio.export_midi import export_score_to_midi
+
+            out_path, err = export_score_to_midi(parsed, path)
+            if out_path:
+                messagebox.showinfo(_("导出成功"), _("已保存到 {path}").format(path=out_path))
+            else:
+                messagebox.showwarning(_("导出失败"), _(err) if err else _("无法导出 MIDI"))
+        except Exception as e:
+            import traceback
+            show_error_detail(self.root, _("导出失败"), str(e), traceback.format_exc())
+
+    def _on_import_midi(self):
+        """导入 MIDI 文件，转换为 choir 格式并自动创建新文件（重名则加 (1)、(2)）"""
+        initialdir = str(self.current_file_path.parent) if self.current_file_path else None
+        mid_path = filedialog.askopenfilename(
+            title=_("导入 MIDI 文件"),
+            initialdir=initialdir,
+            filetypes=[(_("MIDI 文件"), "*.mid *.midi"), (_("所有文件"), "*.*")],
+        )
+        if not mid_path:
+            return
+        try:
+            from src.utils.midi_to_choir import midi_to_choir_text
+            choir_text = midi_to_choir_text(Path(mid_path))
+            choir_text = self._format_choir_text(choir_text)
+            save_dir = (
+                self.workspace_root
+                if self.workspace_root and self.workspace_root.is_dir()
+                else (self.current_file_path.parent if self.current_file_path else Path.cwd())
+            )
+            base_name = Path(mid_path).stem
+            out_path = save_dir / f"{base_name}.choir"
+            n = 1
+            while out_path.exists():
+                out_path = save_dir / f"{base_name}({n}).choir"
+                n += 1
+            out_path.write_text(choir_text, encoding="utf-8")
+            self._load_file(out_path)
+            if self.workspace_root and save_dir.resolve() == self.workspace_root.resolve():
+                self._refresh_workspace_list()
+            self.status_label.config(text=_("已导入 MIDI: {path}").format(path=out_path.name))
+        except Exception as e:
+            import traceback
+            show_error_detail(self.root, _("导入失败"), str(e), traceback.format_exc())
+
+    def _format_choir_text(self, text: str, force_auto_wrap: bool = True) -> str:
+        """对 choir 文本执行格式化（小节对齐、自动换行等），不修改当前编辑器内容"""
+        prev_content = self.text.get(1.0, tk.END)
+        self.text.delete(1.0, tk.END)
+        self.text.insert(tk.END, text)
+        self._on_align(force_auto_wrap=force_auto_wrap)
+        result = self.text.get(1.0, tk.END)
+        self.text.delete(1.0, tk.END)
+        self.text.insert(tk.END, prev_content)
+        return result
+
+    def _insert_and_format(self, s: str):
+        """插入内容后自动格式化（用于伴奏生成、导入 MIDI 等）"""
+        self.text.insert(tk.INSERT, s)
+        self._on_format()
 
     def _on_format(self):
         """格式化：对齐小节号"""
@@ -992,7 +1092,7 @@ class App:
                 current_filename=self.current_file_path.name if self.current_file_path else None,
                 base_dir=base_dir,
                 get_content=lambda: self.text.get(1.0, tk.END),
-                on_insert=lambda s: self.text.insert(tk.INSERT, s),
+                on_insert=lambda s: self._insert_and_format(s),
             )
         except ImportError as e:
             import traceback
@@ -1508,9 +1608,27 @@ class App:
         self._workspace_list.selection_clear(0, tk.END)
         self._workspace_list.selection_set(idx)
         menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label=_("在 Finder 中显示") if sys.platform == "darwin" else _("在文件资源管理器中显示"), command=lambda: self._on_workspace_reveal_in_finder(idx))
+        menu.add_separator()
         menu.add_command(label=_("重命名"), command=lambda: self._on_workspace_rename(idx))
         menu.add_command(label=_("删除"), command=lambda: self._on_workspace_delete(idx))
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _on_workspace_reveal_in_finder(self, idx: int):
+        """在 Finder/文件资源管理器中显示并选中该文件"""
+        files = self._get_workspace_files()
+        if idx >= len(files):
+            return
+        path = files[idx]
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["open", "-R", str(path)], check=True)
+            elif sys.platform == "win32":
+                subprocess.run(["explorer", '/select,"' + str(path.resolve()) + '"'], check=True)
+            else:
+                subprocess.run(["xdg-open", str(path.parent)], check=True)
+        except Exception as e:
+            show_error_detail(self.root, _("打开失败"), str(e), None)
 
     def _on_workspace_rename(self, idx: int):
         """重命名工作区文件"""
@@ -1674,6 +1792,9 @@ class App:
         self._playback_total = 0.0
         self._playback_progress_poll_id: str | None = None
         self._playback_progress_ui_switched = False
+        self._playback_bar_pos: int | None = None  # 播放时用于小节高亮的虚拟光标位置
+        self._playback_timeline: list | None = None  # 含 TTS 时长的时间轴
+        self._playback_content: str = ""  # 播放用的内容（expand 后）
 
         # 状态栏（PyCharm 风格）：左侧状态、右侧行列/拍数、右下角可嵌入进度条
         self.status_frame = ttk.Frame(main)
@@ -1920,8 +2041,8 @@ class App:
         self.text.insert(tk.END, text)
         self.text.edit_reset()
     
-    def _on_align(self, event=None):
-        """⌘⇧F/Ctrl+Shift+F: 对齐小节号；勾选时行超宽则自动换新篇章"""
+    def _on_align(self, event=None, force_auto_wrap: bool = False):
+        """⌘⇧F/Ctrl+Shift+F: 对齐小节号；勾选时行超宽则自动换新篇章。force_auto_wrap=True 时强制换行（用于导入生成）"""
         content = self.text.get(1.0, tk.END)
         lines = content.split("\n")
         # 按双换行分篇章，保留篇章间的非 & 行（如 \tonality{D}、空行等）
@@ -1951,12 +2072,12 @@ class App:
         if not sections:
             return "break"
         
-        # 估算每行可显示字符数（等宽）
+        # 估算每行可显示字符数（等宽）。上限 100 确保勾选自动换行时能触发
         try:
             cw = self.text.winfo_width() or 600
             f = tkfont.Font(self.text, self.text.cget("font"))
             char_w = max(f.measure("0"), 1)
-            max_chars = max(60, int(cw / char_w) - 4)
+            max_chars = max(60, min(100, int(cw / char_w) - 4))
         except Exception:
             max_chars = 80
         
@@ -2108,9 +2229,11 @@ class App:
             return result
         
         new_sections: list[tuple[list[str], list[str]]] = []
-        for section, sep_lines in sections:
+        sections_to_process: list[tuple[list[tuple[int, str]], list[str]]] = list(sections)
+        while sections_to_process:
+            section, sep_lines = sections_to_process.pop(0)
             part_lines = section
-            if self.auto_wrap_var.get():
+            if force_auto_wrap or self.auto_wrap_var.get():
                 any_long = any(len(L) > max_chars for _, L in part_lines)
                 if any_long:
                     all_data = [simple_split(L) for _, L in part_lines]
@@ -2142,7 +2265,11 @@ class App:
                     if head_section:
                         new_sections.append((align_section([(0, s) for s in head_section]), []))
                     if tail_section:
-                        new_sections.append((align_section([(0, s) for s in tail_section]), sep_lines))
+                        tail_part_lines = [(0, s) for s in tail_section]
+                        if any(len(s) > max_chars for _, s in tail_part_lines):
+                            sections_to_process.insert(0, (tail_part_lines, sep_lines))
+                        else:
+                            new_sections.append((align_section(tail_part_lines), sep_lines))
                     continue
             aligned = align_section(part_lines)
             new_sections.append((aligned, sep_lines))
@@ -2882,13 +3009,16 @@ class App:
                 self.text.tag_add("bar_line", f"1.0+{i}c", f"1.0+{i+1}c")
 
     def _highlight_bars(self):
-        """光标在小节中时：浅色高亮当前小节，更浅色高亮所有同时演奏的小节"""
+        """光标在小节中时：浅色高亮当前小节，更浅色高亮所有同时演奏的小节。播放时用 _playback_bar_pos"""
         self.text.tag_remove("bar_current", "1.0", tk.END)
         self.text.tag_remove("bar_simultaneous", "1.0", tk.END)
         self.text.tag_remove("bar_clickable", "1.0", tk.END)
         try:
-            insert_idx = self.text.index("insert")
-            cursor_pos = len(self.text.get("1.0", insert_idx))
+            if self.is_playing and self._playback_bar_pos is not None:
+                cursor_pos = self._playback_bar_pos
+            else:
+                insert_idx = self.text.index("insert")
+                cursor_pos = len(self.text.get("1.0", insert_idx))
         except tk.TclError:
             return
         content = self.text.get(1.0, tk.END)
@@ -2901,6 +3031,8 @@ class App:
                 self.text.tag_add("bar_current", f"1.0+{start}c", f"1.0+{end}c")
         for tag in ("bar_simultaneous", "bar_current"):
             self.text.tag_raise(tag)
+        if self.is_playing:
+            return
         cmd_held = getattr(self, "_command_held", False)
         mouse_pos = getattr(self, "_bar_mouse_pos", None)
         if cmd_held and mouse_pos:
@@ -3379,6 +3511,8 @@ class App:
             import traceback
             show_error_detail(self.root, "导入错误", str(e), traceback.format_exc())
             return
+        self._playback_content = excerpt
+        self._playback_timeline = build_playback_timeline(excerpt)
         self.is_playing = True
         self.btn_play.config(state=tk.DISABLED)
         self.btn_play_segment.config(state=tk.DISABLED)
@@ -3477,6 +3611,8 @@ class App:
             show_error_detail(self.root, "导入错误", str(e), traceback.format_exc())
             return
 
+        self._playback_content = score
+        self._playback_timeline = build_playback_timeline(score)
         self.is_playing = True
         self.btn_play.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
@@ -3583,6 +3719,39 @@ class App:
             if t > 0:
                 self.progress_var.set(e / t * 100)
             self._progress_status_var.set(f"播放中 {e:.1f}s / {t:.1f}s")
+            # 根据进度自动滚动、移动光标、高亮小节（多声部同时高亮，考虑 TTS 时长）
+            if t > 0 and self.text.winfo_exists():
+                try:
+                    content = getattr(self, "_playback_content", None) or self.text.get(1.0, tk.END)
+                    if content:
+                        progress = min(e / (t * 0.93), 1.0) if t > 0 else 0
+                        pos = get_position_for_progress(
+                            content, progress,
+                            timeline=getattr(self, "_playback_timeline", None),
+                            actual_total=t,
+                        )
+                        pos = max(0, min(pos, len(content) - 1))
+                        # 若 pos 不在小节内，向前/后寻找最近的有效位置
+                        cur_r, sim_r = get_bar_ranges_at_cursor(content, pos)
+                        if not cur_r and not sim_r:
+                            for delta in range(1, min(200, len(content))):
+                                for p in [pos + delta, pos - delta]:
+                                    if 0 <= p < len(content):
+                                        cr, sr = get_bar_ranges_at_cursor(content, p)
+                                        if cr or sr:
+                                            pos = p
+                                            break
+                                else:
+                                    continue
+                                break
+                        self._playback_bar_pos = pos
+                        self.text.mark_set("insert", f"1.0+{pos}c")
+                        line = content[:pos].count("\n") + 1
+                        self.text.see(f"{line}.0")
+                        self._highlight_bars()
+                        self.text.tag_raise("sel")
+                except tk.TclError:
+                    pass
             if self.is_playing:
                 self._playback_progress_poll_id = self.root.after(80, _poll)
 
@@ -3611,7 +3780,11 @@ class App:
 
     def _on_play_finished(self):
         self.is_playing = False
+        self._playback_bar_pos = None
+        self._playback_timeline = None
+        self._playback_content = ""
         self._stop_playback_progress_poll()
+        self._schedule_highlights()
         self.btn_play.config(state=tk.NORMAL)
         self.btn_play_segment.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)

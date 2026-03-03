@@ -891,6 +891,9 @@ def _parse_notation_scope(
                     continue
                 tied_from_prev = t.startswith("~")
                 t_clean = t.lstrip("~")  # 连音线 ~ 不影响时值，只做渲染
+                # (1.) 等带括号单音/和弦：midi_to_choir 可能输出，parser 需能解析
+                if t_clean.startswith("(") and t_clean.endswith(")") and " " not in t_clean[1:-1]:
+                    t_clean = t_clean[1:-1]
                 if t_clean.lower() == "[r]":
                     # [r] 重复上一个音，括号内也支持；~[r] 表示连音，无 ~ 则重新触发
                     # 优先从同组 notes_in_tuplet 取上一音（如 (b6/1. [r][r] 中 [r] 应重复 b6/1.）

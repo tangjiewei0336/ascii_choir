@@ -254,19 +254,23 @@ _PC_TO_DEGREE = {0: 1, 1: 1, 2: 2, 3: 2, 4: 3, 5: 4, 6: 4, 7: 5, 8: 5, 9: 6, 10:
 
 def midi_to_simplified_notation(midi: int, tonality_offset: int = 0) -> str:
     """
-    MIDI 转简谱格式，如 36 -> ..1，48 -> .1，60 -> 1。
-    用于鼓声部等，输出 .1 .2 .3 这类纯数字格式，便于对齐。
+    MIDI 转简谱格式，如 36 -> ..1，48 -> .1，60 -> 1，72 -> 1.。
+    左侧点表示低八度，右侧点表示高八度。
     """
     base = midi - tonality_offset
     pc = base % 12
     octave = base // 12
-    # C4=60 对应 octave 5，简谱 1 无点；每低一档 octave 加一个下点
-    ref_octave = 5  # 1 无点
+    ref_octave = 5  # C4=60 对应 1 无点
     octave_diff = ref_octave - octave
     degree = _PC_TO_DEGREE.get(pc, 1)
     acc = "#" if pc in (1, 3, 6, 8, 10) else ""
-    dots = "." * max(0, octave_diff)
-    return f"{dots}{acc}{degree}"
+    if octave_diff > 0:
+        left_dots = "." * octave_diff
+        return f"{left_dots}{acc}{degree}"
+    if octave_diff < 0:
+        right_dots = "." * (-octave_diff)
+        return f"{acc}{degree}{right_dots}"
+    return f"{acc}{degree}"
 
 
 def note_name_to_midi(s: str) -> Optional[int]:
